@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+# Written by `zig build shaders`; edit the .slang files instead.
+src/shaders/gles/*.glsl linguist-generated=true
