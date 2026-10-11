@@ -4,13 +4,6 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const translate_c = b.addTranslateC(.{
-        .root_source_file = b.path("src/c.h"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const c = translate_c.createModule();
-
     // FreeType, HarfBuzz and libunibreak are built from source, so that
     // nothing has to be installed to build this.
     // They are optimized whatever the rest is built as: unoptimized, laying
@@ -67,7 +60,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "c", .module = c },
             .{ .name = "ft", .module = translate_text.createModule() },
         },
     });

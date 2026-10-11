@@ -1,7 +1,7 @@
 //! OpenGL ES 3.0.
 
 const std = @import("std");
-const c = @import("c");
+const GL = @import("gles_api.zig");
 const types = @import("../types.zig");
 const blur = @import("../blur.zig");
 
@@ -43,23 +43,25 @@ const filter_binding = 1;
 
 /// An offscreen image.
 const Target = struct {
-    framebuffer: c.GLuint = 0,
-    texture: c.GLuint = 0,
+    framebuffer: GL.Uint = 0,
+    texture: GL.Uint = 0,
     width: u32 = 0,
     height: u32 = 0,
 };
 
 pub const Backend = struct {
-    rect_program: c.GLuint,
-    rect_vao: c.GLuint,
-    rect_vbo: c.GLuint,
-    frame_block: c.GLuint,
+    gl: GL.Functions,
 
-    effect_program: c.GLuint,
+    rect_program: GL.Uint,
+    rect_vao: GL.Uint,
+    rect_vbo: GL.Uint,
+    frame_block: GL.Uint,
+
+    effect_program: GL.Uint,
     /// Kept so that drawing the effect quad does not run with the
     /// rectangle's attributes enabled.
-    effect_vao: c.GLuint,
-    filter_block: c.GLuint,
+    effect_vao: GL.Uint,
+    filter_block: GL.Uint,
 
     /// Mirror the glyph atlases, in the order of `AtlasUpdate.Kind`. The
     /// textures are zero until the first update.
@@ -67,35 +69,40 @@ pub const Backend = struct {
 
     width: u32 = 0,
     height: u32 = 0,
-    screen: c.GLuint = 0,
+    screen: GL.Uint = 0,
 
     open: usize = 0,
 
     targets: [types.max_depth]Target = @splat(.{}),
     levels: [blur.max_passes]Target = @splat(.{}),
 
-    pub fn init() !Backend {
-        const rect_program = try createProgram(rect_vertex, rect_fragment);
-        errdefer c.glDeleteProgram(rect_program);
-        try bindBlock(rect_program, "SLANG_ParameterGroup_Frame_std140", frame_binding);
+    /// Needs an OpenGL ES 3.0 context to be current, and `loader` to return
+    /// its functions.
+    pub fn init(loader: GL.Loader) !Backend {
+        const table = try GL.Functions.load(loader);
+        const gl = &table;
 
-        const effect_program = try createProgram(effect_vertex, effect_fragment);
-        errdefer c.glDeleteProgram(effect_program);
-        try bindBlock(effect_program, "SLANG_ParameterGroup_Filter_std140", filter_binding);
-        c.glUseProgram(effect_program);
-        c.glUniform1i(c.glGetUniformLocation(effect_program, "source"), 0);
-        c.glUseProgram(rect_program);
-        c.glUniform1i(c.glGetUniformLocation(rect_program, "atlas"), 0);
-        c.glUniform1i(c.glGetUniformLocation(rect_program, "color_atlas"), 1);
-        c.glUniform1i(c.glGetUniformLocation(rect_program, "picture"), 2);
+        const rect_program = try createProgram(gl, rect_vertex, rect_fragment);
+        errdefer gl.DeleteProgram(rect_program);
+        try bindBlock(gl, rect_program, "SLANG_ParameterGroup_Frame_std140", frame_binding);
 
-        var rect_vao: c.GLuint = 0;
-        c.glGenVertexArrays(1, &rect_vao);
-        c.glBindVertexArray(rect_vao);
+        const effect_program = try createProgram(gl, effect_vertex, effect_fragment);
+        errdefer gl.DeleteProgram(effect_program);
+        try bindBlock(gl, effect_program, "SLANG_ParameterGroup_Filter_std140", filter_binding);
+        gl.UseProgram(effect_program);
+        gl.Uniform1i(gl.GetUniformLocation(effect_program, "source"), 0);
+        gl.UseProgram(rect_program);
+        gl.Uniform1i(gl.GetUniformLocation(rect_program, "atlas"), 0);
+        gl.Uniform1i(gl.GetUniformLocation(rect_program, "color_atlas"), 1);
+        gl.Uniform1i(gl.GetUniformLocation(rect_program, "picture"), 2);
 
-        var rect_vbo: c.GLuint = 0;
-        c.glGenBuffers(1, &rect_vbo);
-        c.glBindBuffer(c.GL_ARRAY_BUFFER, rect_vbo);
+        var rect_vao: GL.Uint = 0;
+        gl.GenVertexArrays(1, &rect_vao);
+        gl.BindVertexArray(rect_vao);
+
+        var rect_vbo: GL.Uint = 0;
+        gl.GenBuffers(1, &rect_vbo);
+        gl.BindBuffer(GL.ARRAY_BUFFER, rect_vbo);
 
         inline for (.{
             .{ "rect", 4 },
@@ -108,49 +115,52 @@ pub const Backend = struct {
             .{ "kind", 1 },
             .{ "clip_radii", 4 },
         }, 0..) |field, location| {
-            c.glVertexAttribPointer(
+            gl.VertexAttribPointer(
                 location,
                 field[1],
-                c.GL_FLOAT,
-                c.GL_FALSE,
+                GL.FLOAT,
+                GL.FALSE,
                 @sizeOf(Instance),
                 @ptrFromInt(@offsetOf(Instance, field[0])),
             );
-            c.glEnableVertexAttribArray(location);
-            c.glVertexAttribDivisor(location, 1);
+            gl.EnableVertexAttribArray(location);
+            gl.VertexAttribDivisor(location, 1);
         }
 
-        var effect_vao: c.GLuint = 0;
-        c.glGenVertexArrays(1, &effect_vao);
+        var effect_vao: GL.Uint = 0;
+        gl.GenVertexArrays(1, &effect_vao);
 
         return .{
+            .gl = table,
             .rect_program = rect_program,
             .rect_vao = rect_vao,
             .rect_vbo = rect_vbo,
-            .frame_block = createBlock(FrameBlock, frame_binding),
+            .frame_block = createBlock(gl, FrameBlock, frame_binding),
             .effect_program = effect_program,
             .effect_vao = effect_vao,
-            .filter_block = createBlock(FilterBlock, filter_binding),
+            .filter_block = createBlock(gl, FilterBlock, filter_binding),
         };
     }
 
     pub fn deinit(backend: *Backend) void {
+        const gl = &backend.gl;
         backend.deleteTargets();
         for (&backend.atlases) |*atlas| {
-            if (atlas.texture != 0) c.glDeleteTextures(1, &atlas.texture);
+            if (atlas.texture != 0) gl.DeleteTextures(1, &atlas.texture);
         }
-        c.glDeleteBuffers(1, &backend.filter_block);
-        c.glDeleteBuffers(1, &backend.frame_block);
-        c.glDeleteVertexArrays(1, &backend.effect_vao);
-        c.glDeleteBuffers(1, &backend.rect_vbo);
-        c.glDeleteVertexArrays(1, &backend.rect_vao);
-        c.glDeleteProgram(backend.effect_program);
-        c.glDeleteProgram(backend.rect_program);
+        gl.DeleteBuffers(1, &backend.filter_block);
+        gl.DeleteBuffers(1, &backend.frame_block);
+        gl.DeleteVertexArrays(1, &backend.effect_vao);
+        gl.DeleteBuffers(1, &backend.rect_vbo);
+        gl.DeleteVertexArrays(1, &backend.rect_vao);
+        gl.DeleteProgram(backend.effect_program);
+        gl.DeleteProgram(backend.rect_program);
     }
 
     /// Clears whichever framebuffer is bound; that one counts as the screen
     /// until the next call.
     pub fn beginFrame(backend: *Backend, width: u32, height: u32, background: [4]f32) void {
+        const gl = &backend.gl;
         if (width != backend.width or height != backend.height) {
             backend.deleteTargets();
             backend.width = width;
@@ -158,28 +168,29 @@ pub const Backend = struct {
         }
         backend.open = 0;
 
-        var screen: c.GLint = 0;
-        c.glGetIntegerv(c.GL_FRAMEBUFFER_BINDING, &screen);
+        var screen: GL.Int = 0;
+        gl.GetIntegerv(GL.FRAMEBUFFER_BINDING, &screen);
         backend.screen = @intCast(screen);
 
-        c.glViewport(0, 0, @intCast(width), @intCast(height));
-        c.glClearColor(background[0], background[1], background[2], background[3]);
-        c.glClear(c.GL_COLOR_BUFFER_BIT);
+        gl.Viewport(0, 0, @intCast(width), @intCast(height));
+        gl.ClearColor(background[0], background[1], background[2], background[3]);
+        gl.Clear(GL.COLOR_BUFFER_BIT);
 
         const block: FrameBlock = .{
             .viewport = .{ @floatFromInt(width), @floatFromInt(height) },
         };
-        c.glBindBuffer(c.GL_UNIFORM_BUFFER, backend.frame_block);
-        c.glBufferSubData(c.GL_UNIFORM_BUFFER, 0, @sizeOf(FrameBlock), &block);
+        gl.BindBuffer(GL.UNIFORM_BUFFER, backend.frame_block);
+        gl.BufferSubData(GL.UNIFORM_BUFFER, 0, @sizeOf(FrameBlock), &block);
     }
 
     /// Brings a texture up to date with the atlas the text system keeps in
     /// memory.
     pub fn updateAtlas(backend: *Backend, update: types.AtlasUpdate) void {
+        const gl = &backend.gl;
         const atlas = &backend.atlases[@intFromEnum(update.kind)];
-        const internal: c.GLint, const format: c.GLenum = switch (update.kind) {
-            .mask => .{ c.GL_R8, c.GL_RED },
-            .color => .{ c.GL_RGBA8, c.GL_RGBA },
+        const internal: GL.Int, const format: GL.Enum = switch (update.kind) {
+            .mask => .{ GL.R8, GL.RED },
+            .color => .{ GL.RGBA8, GL.RGBA },
         };
         const stride: usize = switch (update.kind) {
             .mask => 1,
@@ -187,46 +198,46 @@ pub const Backend = struct {
         };
 
         // Rows of one byte pixels are not padded to four bytes.
-        c.glPixelStorei(c.GL_UNPACK_ALIGNMENT, 1);
-        defer c.glPixelStorei(c.GL_UNPACK_ALIGNMENT, 4);
+        gl.PixelStorei(GL.UNPACK_ALIGNMENT, 1);
+        defer gl.PixelStorei(GL.UNPACK_ALIGNMENT, 4);
 
         if (atlas.texture == 0) {
-            c.glGenTextures(1, &atlas.texture);
-            c.glBindTexture(c.GL_TEXTURE_2D, atlas.texture);
-            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
-            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
-            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_CLAMP_TO_EDGE);
-            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_CLAMP_TO_EDGE);
+            gl.GenTextures(1, &atlas.texture);
+            gl.BindTexture(GL.TEXTURE_2D, atlas.texture);
+            gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+            gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.LINEAR);
+            gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.CLAMP_TO_EDGE);
+            gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.CLAMP_TO_EDGE);
         }
-        c.glBindTexture(c.GL_TEXTURE_2D, atlas.texture);
+        gl.BindTexture(GL.TEXTURE_2D, atlas.texture);
 
         // A texture cannot grow, so a new size means a new image.
         if (atlas.width != update.width or atlas.height != update.height) {
             atlas.width = update.width;
             atlas.height = update.height;
-            c.glTexImage2D(
-                c.GL_TEXTURE_2D,
+            gl.TexImage2D(
+                GL.TEXTURE_2D,
                 0,
                 internal,
                 @intCast(update.width),
                 @intCast(update.height),
                 0,
                 format,
-                c.GL_UNSIGNED_BYTE,
+                GL.UNSIGNED_BYTE,
                 update.pixels.ptr,
             );
             return;
         }
 
-        c.glTexSubImage2D(
-            c.GL_TEXTURE_2D,
+        gl.TexSubImage2D(
+            GL.TEXTURE_2D,
             0,
             0,
             @intCast(update.first_row),
             @intCast(update.width),
             @intCast(update.end_row - update.first_row),
             format,
-            c.GL_UNSIGNED_BYTE,
+            GL.UNSIGNED_BYTE,
             update.pixels[update.first_row * update.width * stride ..].ptr,
         );
     }
@@ -235,74 +246,75 @@ pub const Backend = struct {
     /// top down, with the colors already multiplied by the alpha. The
     /// result is what `draw` takes; zero is never returned.
     pub fn createImage(backend: *Backend, width: u32, height: u32, pixels: []const u8) u32 {
-        _ = backend;
-        var texture: c.GLuint = 0;
-        c.glGenTextures(1, &texture);
-        c.glBindTexture(c.GL_TEXTURE_2D, texture);
-        c.glPixelStorei(c.GL_UNPACK_ALIGNMENT, 1);
-        defer c.glPixelStorei(c.GL_UNPACK_ALIGNMENT, 4);
-        c.glTexImage2D(
-            c.GL_TEXTURE_2D,
+        const gl = &backend.gl;
+        var texture: GL.Uint = 0;
+        gl.GenTextures(1, &texture);
+        gl.BindTexture(GL.TEXTURE_2D, texture);
+        gl.PixelStorei(GL.UNPACK_ALIGNMENT, 1);
+        defer gl.PixelStorei(GL.UNPACK_ALIGNMENT, 4);
+        gl.TexImage2D(
+            GL.TEXTURE_2D,
             0,
-            c.GL_RGBA8,
+            GL.RGBA8,
             @intCast(width),
             @intCast(height),
             0,
-            c.GL_RGBA,
-            c.GL_UNSIGNED_BYTE,
+            GL.RGBA,
+            GL.UNSIGNED_BYTE,
             pixels.ptr,
         );
         // Smaller copies, so that an image shown small does not shimmer.
-        c.glGenerateMipmap(c.GL_TEXTURE_2D);
-        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR_MIPMAP_LINEAR);
-        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
-        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_CLAMP_TO_EDGE);
-        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_CLAMP_TO_EDGE);
+        gl.GenerateMipmap(GL.TEXTURE_2D);
+        gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR_MIPMAP_LINEAR);
+        gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.LINEAR);
+        gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.CLAMP_TO_EDGE);
+        gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.CLAMP_TO_EDGE);
         return texture;
     }
 
     pub fn destroyImage(backend: *Backend, image: u32) void {
-        _ = backend;
-        c.glDeleteTextures(1, &image);
+        backend.gl.DeleteTextures(1, &image);
     }
 
     /// Draws into the innermost open layer, or the screen if there is none.
     /// `image` is what the instances of `kind_image` are filled with; zero
     /// if there are none.
     pub fn draw(backend: *Backend, instances: []const Instance, image: u32) void {
+        const gl = &backend.gl;
         if (instances.len == 0) return;
 
-        c.glEnable(c.GL_BLEND);
-        c.glBlendFunc(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
-        c.glUseProgram(backend.rect_program);
-        c.glActiveTexture(c.GL_TEXTURE2);
-        c.glBindTexture(c.GL_TEXTURE_2D, image);
-        c.glActiveTexture(c.GL_TEXTURE1);
-        c.glBindTexture(c.GL_TEXTURE_2D, backend.atlases[1].texture);
-        c.glActiveTexture(c.GL_TEXTURE0);
-        c.glBindTexture(c.GL_TEXTURE_2D, backend.atlases[0].texture);
-        c.glBindVertexArray(backend.rect_vao);
-        c.glBindBuffer(c.GL_ARRAY_BUFFER, backend.rect_vbo);
-        c.glBufferData(
-            c.GL_ARRAY_BUFFER,
+        gl.Enable(GL.BLEND);
+        gl.BlendFunc(GL.ONE, GL.ONE_MINUS_SRC_ALPHA);
+        gl.UseProgram(backend.rect_program);
+        gl.ActiveTexture(GL.TEXTURE2);
+        gl.BindTexture(GL.TEXTURE_2D, image);
+        gl.ActiveTexture(GL.TEXTURE1);
+        gl.BindTexture(GL.TEXTURE_2D, backend.atlases[1].texture);
+        gl.ActiveTexture(GL.TEXTURE0);
+        gl.BindTexture(GL.TEXTURE_2D, backend.atlases[0].texture);
+        gl.BindVertexArray(backend.rect_vao);
+        gl.BindBuffer(GL.ARRAY_BUFFER, backend.rect_vbo);
+        gl.BufferData(
+            GL.ARRAY_BUFFER,
             @intCast(@sizeOf(Instance) * instances.len),
             instances.ptr,
-            c.GL_STREAM_DRAW,
+            GL.STREAM_DRAW,
         );
-        c.glDrawArraysInstanced(c.GL_TRIANGLE_STRIP, 0, 4, @intCast(instances.len));
+        gl.DrawArraysInstanced(GL.TRIANGLE_STRIP, 0, 4, @intCast(instances.len));
     }
 
     /// Redirects drawing to a transparent offscreen image.
     pub fn beginLayer(backend: *Backend) void {
+        const gl = &backend.gl;
         std.debug.assert(backend.open < types.max_depth);
 
         const target = &backend.targets[backend.open];
-        if (target.texture == 0) target.* = createTarget(backend.width, backend.height);
+        if (target.texture == 0) target.* = createTarget(gl, backend.width, backend.height);
         backend.open += 1;
 
-        c.glBindFramebuffer(c.GL_FRAMEBUFFER, target.framebuffer);
-        c.glClearColor(0, 0, 0, 0);
-        c.glClear(c.GL_COLOR_BUFFER_BIT);
+        gl.BindFramebuffer(GL.FRAMEBUFFER, target.framebuffer);
+        gl.ClearColor(0, 0, 0, 0);
+        gl.Clear(GL.COLOR_BUFFER_BIT);
     }
 
     /// Runs `effects` over the innermost layer and lays the result over
@@ -327,10 +339,11 @@ pub const Backend = struct {
     }
 
     fn blurTarget(backend: *Backend, target: Target, sigma: f32) void {
+        const gl = &backend.gl;
         const plan = blur.plan(sigma, @min(backend.width, backend.height));
         if (plan.passes == 0) return;
 
-        c.glDisable(c.GL_BLEND);
+        gl.Disable(GL.BLEND);
         var source = target;
         for (0..plan.passes) |index| {
             const level = backend.acquireLevel(index);
@@ -346,14 +359,15 @@ pub const Backend = struct {
         }
 
         if (plan.mix < 1) {
-            c.glEnable(c.GL_BLEND);
-            c.glBlendColor(0, 0, 0, plan.mix);
-            c.glBlendFunc(c.GL_CONSTANT_ALPHA, c.GL_ONE_MINUS_CONSTANT_ALPHA);
+            gl.Enable(GL.BLEND);
+            gl.BlendColor(0, 0, 0, plan.mix);
+            gl.BlendFunc(GL.CONSTANT_ALPHA, GL.ONE_MINUS_CONSTANT_ALPHA);
         }
         backend.blurPass(source, target, .upsample, plan.offset);
     }
 
     fn composite(backend: *Backend, source: Target, destination: Target, how: types.Composite) void {
+        const gl = &backend.gl;
         // The shader fades the edge of the outer clip; the scissor only
         // spares it the pixels that are far outside.
         const left = @max(0, @floor(how.outer_clip[0]));
@@ -364,17 +378,17 @@ pub const Backend = struct {
 
         // Scissor counts y from the bottom of the framebuffer.
         const height: f32 = @floatFromInt(backend.height);
-        c.glEnable(c.GL_SCISSOR_TEST);
-        defer c.glDisable(c.GL_SCISSOR_TEST);
-        c.glScissor(
+        gl.Enable(GL.SCISSOR_TEST);
+        defer gl.Disable(GL.SCISSOR_TEST);
+        gl.Scissor(
             @intFromFloat(left),
             @intFromFloat(@max(0, height - bottom)),
             @intFromFloat(right - left),
             @intFromFloat(bottom - top),
         );
 
-        c.glEnable(c.GL_BLEND);
-        c.glBlendFunc(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
+        gl.Enable(GL.BLEND);
+        gl.BlendFunc(GL.ONE, GL.ONE_MINUS_SRC_ALPHA);
         backend.filter(source, destination, .{
             .mode = .composite,
             .scale = how.scale,
@@ -407,16 +421,17 @@ pub const Backend = struct {
     /// Fills `destination` with `source` run through the effect shader.
     /// Leaves `destination` bound and the viewport set to its size.
     fn filter(backend: *Backend, source: Target, destination: Target, block: FilterBlock) void {
-        c.glBindBuffer(c.GL_UNIFORM_BUFFER, backend.filter_block);
-        c.glBufferSubData(c.GL_UNIFORM_BUFFER, 0, @sizeOf(FilterBlock), &block);
+        const gl = &backend.gl;
+        gl.BindBuffer(GL.UNIFORM_BUFFER, backend.filter_block);
+        gl.BufferSubData(GL.UNIFORM_BUFFER, 0, @sizeOf(FilterBlock), &block);
 
-        c.glBindFramebuffer(c.GL_FRAMEBUFFER, destination.framebuffer);
-        c.glViewport(0, 0, @intCast(destination.width), @intCast(destination.height));
-        c.glUseProgram(backend.effect_program);
-        c.glActiveTexture(c.GL_TEXTURE0);
-        c.glBindTexture(c.GL_TEXTURE_2D, source.texture);
-        c.glBindVertexArray(backend.effect_vao);
-        c.glDrawArrays(c.GL_TRIANGLE_STRIP, 0, 4);
+        gl.BindFramebuffer(GL.FRAMEBUFFER, destination.framebuffer);
+        gl.Viewport(0, 0, @intCast(destination.width), @intCast(destination.height));
+        gl.UseProgram(backend.effect_program);
+        gl.ActiveTexture(GL.TEXTURE0);
+        gl.BindTexture(GL.TEXTURE_2D, source.texture);
+        gl.BindVertexArray(backend.effect_vao);
+        gl.DrawArrays(GL.TRIANGLE_STRIP, 0, 4);
     }
 
     fn acquireLevel(backend: *Backend, index: usize) Target {
@@ -424,6 +439,7 @@ pub const Backend = struct {
         if (level.texture == 0) {
             const shift: u5 = @intCast(index + 1);
             level.* = createTarget(
+                &backend.gl,
                 @max(1, backend.width >> shift),
                 @max(1, backend.height >> shift),
             );
@@ -432,109 +448,115 @@ pub const Backend = struct {
     }
 
     fn deleteTargets(backend: *Backend) void {
-        for (&backend.targets) |*target| deleteTarget(target);
-        for (&backend.levels) |*level| deleteTarget(level);
+        for (&backend.targets) |*target| deleteTarget(&backend.gl, target);
+        for (&backend.levels) |*level| deleteTarget(&backend.gl, level);
     }
 };
 
-fn createTarget(width: u32, height: u32) Target {
+fn createTarget(gl: *const GL.Functions, width: u32, height: u32) Target {
     var target: Target = .{ .width = width, .height = height };
 
-    c.glGenTextures(1, &target.texture);
-    c.glBindTexture(c.GL_TEXTURE_2D, target.texture);
-    c.glTexImage2D(
-        c.GL_TEXTURE_2D,
+    gl.GenTextures(1, &target.texture);
+    gl.BindTexture(GL.TEXTURE_2D, target.texture);
+    gl.TexImage2D(
+        GL.TEXTURE_2D,
         0,
-        c.GL_RGBA8,
+        GL.RGBA8,
         @intCast(width),
         @intCast(height),
         0,
-        c.GL_RGBA,
-        c.GL_UNSIGNED_BYTE,
+        GL.RGBA,
+        GL.UNSIGNED_BYTE,
         null,
     );
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_CLAMP_TO_EDGE);
-    c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_CLAMP_TO_EDGE);
+    gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.LINEAR);
+    gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_S, GL.CLAMP_TO_EDGE);
+    gl.TexParameteri(GL.TEXTURE_2D, GL.TEXTURE_WRAP_T, GL.CLAMP_TO_EDGE);
 
-    c.glGenFramebuffers(1, &target.framebuffer);
-    c.glBindFramebuffer(c.GL_FRAMEBUFFER, target.framebuffer);
-    c.glFramebufferTexture2D(
-        c.GL_FRAMEBUFFER,
-        c.GL_COLOR_ATTACHMENT0,
-        c.GL_TEXTURE_2D,
+    gl.GenFramebuffers(1, &target.framebuffer);
+    gl.BindFramebuffer(GL.FRAMEBUFFER, target.framebuffer);
+    gl.FramebufferTexture2D(
+        GL.FRAMEBUFFER,
+        GL.COLOR_ATTACHMENT0,
+        GL.TEXTURE_2D,
         target.texture,
         0,
     );
-    if (c.glCheckFramebufferStatus(c.GL_FRAMEBUFFER) != c.GL_FRAMEBUFFER_COMPLETE) {
+    if (gl.CheckFramebufferStatus(GL.FRAMEBUFFER) != GL.FRAMEBUFFER_COMPLETE) {
         std.log.err("gles: offscreen target is incomplete", .{});
     }
     return target;
 }
 
-fn deleteTarget(target: *Target) void {
+fn deleteTarget(gl: *const GL.Functions, target: *Target) void {
     if (target.texture == 0) return;
-    c.glDeleteFramebuffers(1, &target.framebuffer);
-    c.glDeleteTextures(1, &target.texture);
+    gl.DeleteFramebuffers(1, &target.framebuffer);
+    gl.DeleteTextures(1, &target.texture);
     target.* = .{};
 }
 
 /// Allocates a uniform buffer for one `Block` and attaches it to `binding`.
-fn createBlock(comptime Block: type, binding: c.GLuint) c.GLuint {
-    var buffer: c.GLuint = 0;
-    c.glGenBuffers(1, &buffer);
-    c.glBindBuffer(c.GL_UNIFORM_BUFFER, buffer);
-    c.glBufferData(c.GL_UNIFORM_BUFFER, @sizeOf(Block), null, c.GL_DYNAMIC_DRAW);
-    c.glBindBufferBase(c.GL_UNIFORM_BUFFER, binding, buffer);
+fn createBlock(gl: *const GL.Functions, comptime Block: type, binding: GL.Uint) GL.Uint {
+    var buffer: GL.Uint = 0;
+    gl.GenBuffers(1, &buffer);
+    gl.BindBuffer(GL.UNIFORM_BUFFER, buffer);
+    gl.BufferData(GL.UNIFORM_BUFFER, @sizeOf(Block), null, GL.DYNAMIC_DRAW);
+    gl.BindBufferBase(GL.UNIFORM_BUFFER, binding, buffer);
     return buffer;
 }
 
 /// Points the uniform block `name` of `program` at `binding`.
-fn bindBlock(program: c.GLuint, name: [*:0]const u8, binding: c.GLuint) !void {
-    const index = c.glGetUniformBlockIndex(program, name);
-    if (index == c.GL_INVALID_INDEX) {
+fn bindBlock(
+    gl: *const GL.Functions,
+    program: GL.Uint,
+    name: [*:0]const u8,
+    binding: GL.Uint,
+) !void {
+    const index = gl.GetUniformBlockIndex(program, name);
+    if (index == GL.INVALID_INDEX) {
         std.log.err("gles: shader has no uniform block {s}", .{name});
         return error.ShaderInterface;
     }
-    c.glUniformBlockBinding(program, index, binding);
+    gl.UniformBlockBinding(program, index, binding);
 }
 
 fn createProgram(
+    gl: *const GL.Functions,
     vertex_source: [*:0]const u8,
     fragment_source: [*:0]const u8,
-) !c.GLuint {
-    const vertex = try compileShader(c.GL_VERTEX_SHADER, vertex_source);
-    defer c.glDeleteShader(vertex);
-    const fragment = try compileShader(c.GL_FRAGMENT_SHADER, fragment_source);
-    defer c.glDeleteShader(fragment);
+) !GL.Uint {
+    const vertex = try compileShader(gl, GL.VERTEX_SHADER, vertex_source);
+    defer gl.DeleteShader(vertex);
+    const fragment = try compileShader(gl, GL.FRAGMENT_SHADER, fragment_source);
+    defer gl.DeleteShader(fragment);
 
-    const program = c.glCreateProgram();
-    c.glAttachShader(program, vertex);
-    c.glAttachShader(program, fragment);
-    c.glLinkProgram(program);
+    const program = gl.CreateProgram();
+    gl.AttachShader(program, vertex);
+    gl.AttachShader(program, fragment);
+    gl.LinkProgram(program);
 
-    var linked: c.GLint = c.GL_FALSE;
-    c.glGetProgramiv(program, c.GL_LINK_STATUS, &linked);
-    if (linked == c.GL_FALSE) {
+    var linked: GL.Int = GL.FALSE;
+    gl.GetProgramiv(program, GL.LINK_STATUS, &linked);
+    if (linked == GL.FALSE) {
         var log: [512:0]u8 = @splat(0);
-        c.glGetProgramInfoLog(program, log.len, null, &log);
+        gl.GetProgramInfoLog(program, log.len, null, &log);
         std.log.err("gles: link: {s}", .{std.mem.sliceTo(&log, 0)});
         return error.ShaderLink;
     }
     return program;
 }
 
-fn compileShader(kind: c.GLenum, source: [*:0]const u8) !c.GLuint {
-    const shader = c.glCreateShader(kind);
-    c.glShaderSource(shader, 1, &source, null);
-    c.glCompileShader(shader);
+fn compileShader(gl: *const GL.Functions, kind: GL.Enum, source: [*:0]const u8) !GL.Uint {
+    const shader = gl.CreateShader(kind);
+    gl.ShaderSource(shader, 1, &source, null);
+    gl.CompileShader(shader);
 
-    var compiled: c.GLint = c.GL_FALSE;
-    c.glGetShaderiv(shader, c.GL_COMPILE_STATUS, &compiled);
-    if (compiled == c.GL_FALSE) {
+    var compiled: GL.Int = GL.FALSE;
+    gl.GetShaderiv(shader, GL.COMPILE_STATUS, &compiled);
+    if (compiled == GL.FALSE) {
         var log: [512:0]u8 = @splat(0);
-        c.glGetShaderInfoLog(shader, log.len, null, &log);
+        gl.GetShaderInfoLog(shader, log.len, null, &log);
         std.log.err("gles: compile: {s}", .{std.mem.sliceTo(&log, 0)});
         return error.ShaderCompile;
     }

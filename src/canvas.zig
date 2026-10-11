@@ -35,7 +35,12 @@ pub const Caret = types.Caret;
 /// to draw on. A canvas given the same one draws what it laid out.
 pub const TextSystem = text_system.System;
 
+/// Returns the function of the current context with the given name, like
+/// `SDL_GL_GetProcAddress` and `eglGetProcAddress`.
+pub const Loader = @import("backend/gles_api.zig").Loader;
+
 pub const Options = struct {
+    loader: Loader,
     /// Has to outlive the canvas. Null makes the canvas keep its own.
     texts: ?*TextSystem = null,
 };
@@ -168,7 +173,7 @@ pub const Canvas = struct {
 
         return .{
             .allocator = allocator,
-            .backend = try Backend.init(),
+            .backend = try Backend.init(options.loader),
             .texts = texts,
             .owns_texts = options.texts == null,
             .instances = instances,
