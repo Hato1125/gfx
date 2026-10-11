@@ -1,6 +1,8 @@
 // One instance is one rectangle or one glyph. The four corners come from the
 // vertex index, so there is no per-vertex buffer.
 
+import sdf;
+
 struct Instance
 {
     [[vk::location(0)]] float4 rect;
@@ -14,6 +16,8 @@ struct Instance
     // Where a glyph sits in its atlas: left, top, right, bottom, in pixels.
     [[vk::location(6)]] float4 uv;
     [[vk::location(7)]] float kind;
+    // The corners of the clip.
+    [[vk::location(8)]] float4 clip_radii;
 };
 
 static const float kind_shape = 0.0;
@@ -34,6 +38,7 @@ struct Varyings
     nointerpolation float border_width;
     float2 uv;
     nointerpolation float kind;
+    nointerpolation float4 clip_radii;
 };
 
 cbuffer Frame
@@ -78,16 +83,8 @@ Varyings vertexMain(Instance instance, uint vertex : SV_VulkanVertexID)
     float2 across = output.local / max(instance.rect.zw, 0.001) + 0.5;
     output.uv = lerp(instance.uv.xy, instance.uv.zw, across);
     output.kind = instance.kind;
+    output.clip_radii = instance.clip_radii;
     return output;
-}
-
-// Signed distance to the edge: negative inside, positive outside.
-float roundedBox(float2 p, float2 half_size, float4 radii)
-{
-    float2 side = p.x < 0.0 ? radii.xw : radii.yz;
-    float radius = p.y < 0.0 ? side.x : side.y;
-    float2 q = abs(p) - (half_size - radius);
-    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - radius;
 }
 
 float4 premultiply(float4 color)
@@ -100,8 +97,7 @@ float4 premultiply(float4 color)
 [shader("fragment")]
 float4 fragmentMain(Varyings input) : SV_Target
 {
-    float2 margin = min(input.pixel - input.clip.xy, input.clip.zw - input.pixel);
-    float visible = saturate(min(margin.x, margin.y) + 0.5);
+    float visible = coverage(input.pixel, input.clip, input.clip_radii);
 
     if (input.kind == kind_glyph)
     {

@@ -73,13 +73,48 @@ pub const Circle = struct {
     border: Border = .{},
 };
 
-/// `x` and `y` move everything drawn until the matching `pop`.
-/// `clip` is given in the moved coordinates and only ever narrows the
-/// clip of the enclosing layer.
+pub const Point = struct {
+    x: f32,
+    y: f32,
+};
+
+/// `x` and `y` move everything drawn until the matching `pop`. The other
+/// fields are given in the moved coordinates.
+///
+/// An opacity under one, a scale other than one and any effect make the
+/// layer be drawn on its own first and laid over the rest afterwards. In
+/// that case the effects come first, then the clip, the opacity and the
+/// scale.
 pub const Layer = struct {
     x: f32 = 0,
     y: f32 = 0,
+    /// Only ever narrows the clip of the enclosing layer.
     clip: ?Bounds = null,
+    /// Rounds the corners of `clip`. Where a clip inside this one cuts a
+    /// rounded corner off, the corner it leaves is square.
+    corners: Corners = .{},
+    /// Applies to the layer as a whole, so shapes that overlap inside it
+    /// do not show through each other.
+    opacity: f32 = 1,
+    /// The layer is shown this many times its size. `origin` stays where
+    /// it is.
+    scale: f32 = 1,
+    origin: Point = .{ .x = 0, .y = 0 },
+};
+
+/// How a backend lays a finished layer over what is under it. Everything
+/// is in pixels; clips are left, top, right, bottom followed by the radii
+/// of the top left, top right, bottom right and bottom left corners.
+pub const Composite = struct {
+    /// The layer's own clip, before the scale.
+    clip: [4]f32,
+    clip_radii: [4]f32,
+    /// The clip the layer was pushed inside, after the scale.
+    outer_clip: [4]f32,
+    outer_clip_radii: [4]f32,
+    opacity: f32,
+    scale: f32,
+    origin: [2]f32,
 };
 
 /// The standard deviation of the gaussian, in the same unit as coordinates.
@@ -174,6 +209,9 @@ pub const Instance = extern struct {
     /// One of the `kind_` values. A float because that is what the vertex
     /// layout carries.
     kind: f32 = kind_shape,
+
+    /// The corners of `clip`, in the order of `radii`.
+    clip_radii: [4]f32 = .{ 0, 0, 0, 0 },
 
     pub const kind_shape: f32 = 0;
     /// The mask atlas says how much of each pixel the fill covers.

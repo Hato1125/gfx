@@ -13,6 +13,7 @@ pub const Bounds = types.Bounds;
 pub const Rect = types.Rect;
 pub const Circle = types.Circle;
 pub const Layer = types.Layer;
+pub const Point = types.Point;
 pub const Blur = types.Blur;
 pub const Effect = types.Effect;
 pub const Frame = types.Frame;
@@ -27,18 +28,61 @@ pub const Caret = types.Caret;
 
 const Instance = types.Instance;
 
+const Clip = struct {
+    /// Left, top, right, bottom in pixels.
+    bounds: [4]f32,
+    /// Top left, top right, bottom right, bottom left.
+    radii: [4]f32 = .{ 0, 0, 0, 0 },
+
+    /// What is inside both. Each corner of the result is rounded like the
+    /// corner it shares with `a` or `b`, and square if it is only where
+    /// two edges happen to cross.
+    fn intersect(a: Clip, b: Clip) Clip {
+        const bounds: [4]f32 = .{
+            @max(a.bounds[0], b.bounds[0]),
+            @max(a.bounds[1], b.bounds[1]),
+            @min(a.bounds[2], b.bounds[2]),
+            @min(a.bounds[3], b.bounds[3]),
+        };
+        // The horizontal and the vertical edge that meet at each corner.
+        const edges = [4][2]usize{
+            .{ 0, 1 },
+            .{ 2, 1 },
+            .{ 2, 3 },
+            .{ 0, 3 },
+        };
+        var radii: [4]f32 = undefined;
+        for (&radii, edges, 0..) |*radius, edge, corner| {
+            radius.* = 0;
+            for ([_]Clip{ a, b }) |source| {
+                const shared = source.bounds[edge[0]] == bounds[edge[0]] and
+                    source.bounds[edge[1]] == bounds[edge[1]];
+                if (shared) radius.* = @max(radius.*, source.radii[corner]);
+            }
+        }
+        return .{ .bounds = bounds, .radii = radii };
+    }
+};
+
 const State = struct {
     x: f32,
     y: f32,
-    clip: [4]f32,
+    clip: Clip,
     layer: usize,
 };
 
 const LayerRecord = struct {
     effects: [types.max_effects]Effect = undefined,
     effect_count: usize = 0,
+    /// Drawn on its own and laid over the rest afterwards.
+    separate: bool,
+    /// The layer's own clip, not narrowed by the ones around it.
+    clip: Clip,
     /// The clip that was active outside the layer.
-    clip: [4]f32,
+    outer_clip: Clip,
+    opacity: f32,
+    scale: f32,
+    origin: [2]f32,
 };
 
 /// `at` is the number of instances recorded before the boundary.
@@ -110,12 +154,12 @@ pub const Canvas = struct {
         canvas.states[0] = .{
             .x = 0,
             .y = 0,
-            .clip = .{
+            .clip = .{ .bounds = .{
                 0,
                 0,
                 @floatFromInt(frame.width),
                 @floatFromInt(frame.height),
-            },
+            } },
             .layer = 0,
         };
         canvas.backend.beginFrame(frame.width, frame.height, frame.background);
@@ -127,20 +171,25 @@ pub const Canvas = struct {
         if (canvas.texts.masks.takeUpdate()) |update| canvas.backend.updateAtlas(update);
         if (canvas.texts.colors.takeUpdate()) |update| canvas.backend.updateAtlas(update);
 
-        // Only layers with an effect interrupt the run of instances.
+        // Only layers drawn on their own interrupt the run of instances.
         var drawn: usize = 0;
         for (canvas.commands[0..canvas.command_count]) |command| {
             const layer = canvas.layers[command.layer];
-            if (layer.effect_count == 0) continue;
+            if (!layer.separate) continue;
 
             canvas.backend.draw(canvas.instances[drawn..command.at]);
             drawn = command.at;
             switch (command.kind) {
                 .layer_begin => canvas.backend.beginLayer(),
-                .layer_end => canvas.backend.endLayer(
-                    layer.effects[0..layer.effect_count],
-                    layer.clip,
-                ),
+                .layer_end => canvas.backend.endLayer(layer.effects[0..layer.effect_count], .{
+                    .clip = layer.clip.bounds,
+                    .clip_radii = layer.clip.radii,
+                    .outer_clip = layer.outer_clip.bounds,
+                    .outer_clip_radii = layer.outer_clip.radii,
+                    .opacity = layer.opacity,
+                    .scale = layer.scale,
+                    .origin = layer.origin,
+                }),
             }
         }
         canvas.backend.draw(canvas.instances[drawn..canvas.instance_count]);
@@ -190,7 +239,8 @@ pub const Canvas = struct {
                 .fill = fill,
                 .radii = .{ 0, 0, 0, 0 },
                 .border_color = .{ 0, 0, 0, 0 },
-                .clip = state.clip,
+                .clip = state.clip.bounds,
+                .clip_radii = state.clip.radii,
                 .uv = .{
                     glyph.atlas_x,
                     glyph.atlas_y,
@@ -225,7 +275,8 @@ pub const Canvas = struct {
                 @min(r.corners.bottom_left * s, limit),
             },
             .border_color = vector(r.border.color),
-            .clip = state.clip,
+            .clip = state.clip.bounds,
+            .clip_radii = state.clip.radii,
             .border_width = r.border.width * s,
         };
         canvas.instance_count += 1;
@@ -248,30 +299,53 @@ pub const Canvas = struct {
         std.debug.assert(canvas.layer_count < max_layers);
 
         const parent = canvas.states[canvas.depth];
+        const frame = canvas.states[0].clip;
         const s = canvas.scale;
-        var state: State = .{
-            .x = parent.x + layer.x * s,
-            .y = parent.y + layer.y * s,
-            .clip = parent.clip,
-            .layer = canvas.layer_count,
-        };
+        const x = parent.x + layer.x * s;
+        const y = parent.y + layer.y * s;
+
+        var own = frame;
         if (layer.clip) |clip| {
-            const left = state.x + clip.x * s;
-            const top = state.y + clip.y * s;
-            state.clip = .{
-                @max(parent.clip[0], left),
-                @max(parent.clip[1], top),
-                @min(parent.clip[2], left + clip.width * s),
-                @min(parent.clip[3], top + clip.height * s),
+            const left = x + clip.x * s;
+            const top = y + clip.y * s;
+            const limit = @min(clip.width, clip.height) * s / 2;
+            own = .{
+                .bounds = .{
+                    left,
+                    top,
+                    left + clip.width * s,
+                    top + clip.height * s,
+                },
+                .radii = .{
+                    @min(layer.corners.top_left * s, limit),
+                    @min(layer.corners.top_right * s, limit),
+                    @min(layer.corners.bottom_right * s, limit),
+                    @min(layer.corners.bottom_left * s, limit),
+                },
             };
         }
 
-        canvas.layers[canvas.layer_count] = .{ .clip = parent.clip };
+        const record_index = canvas.layer_count;
+        canvas.layers[record_index] = .{
+            .separate = layer.opacity < 1 or layer.scale != 1,
+            .clip = own,
+            .outer_clip = parent.clip,
+            .opacity = layer.opacity,
+            .scale = layer.scale,
+            .origin = .{ x + layer.origin.x * s, y + layer.origin.y * s },
+        };
         canvas.layer_count += 1;
-        canvas.record(.layer_begin, state.layer);
+        canvas.record(.layer_begin, record_index);
 
         canvas.depth += 1;
-        canvas.states[canvas.depth] = state;
+        canvas.states[canvas.depth] = .{
+            .x = x,
+            .y = y,
+            // A separate layer is clipped when it is laid over the rest,
+            // so nothing inside it has to be.
+            .clip = if (canvas.layers[record_index].separate) frame else parent.clip.intersect(own),
+            .layer = record_index,
+        };
     }
 
     pub fn pop(canvas: *Canvas) void {
@@ -280,17 +354,22 @@ pub const Canvas = struct {
         canvas.depth -= 1;
     }
 
-    /// Adds an effect to the layer opened by the innermost `push`.
-    /// Effects run in the order they were added, when the layer is popped.
+    /// Adds an effect to the layer opened by the innermost `push`. Call it
+    /// before drawing into the layer. Effects run in the order they were
+    /// added, when the layer is popped.
     pub fn effect(canvas: *Canvas, e: Effect) void {
         std.debug.assert(canvas.depth > 0);
 
-        const layer = &canvas.layers[canvas.states[canvas.depth].layer];
+        const state = &canvas.states[canvas.depth];
+        const layer = &canvas.layers[state.layer];
         std.debug.assert(layer.effect_count < types.max_effects);
         layer.effects[layer.effect_count] = switch (e) {
             .blur => |blur| .{ .blur = .{ .sigma = blur.sigma * canvas.scale } },
         };
         layer.effect_count += 1;
+
+        layer.separate = true;
+        state.clip = canvas.states[0].clip;
     }
 
     fn record(canvas: *Canvas, kind: @FieldType(Command, "kind"), layer: usize) void {

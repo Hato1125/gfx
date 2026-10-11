@@ -21,12 +21,22 @@ const FrameBlock = extern struct {
     viewport: [2]f32,
     padding: [2]f32 = .{ 0, 0 },
 };
+// In the order of the block, which leaves no gaps before any field. The
+// fields after `mode` only matter for compositing.
 const FilterBlock = extern struct {
-    half_texel: [2]f32,
+    half_texel: [2]f32 = .{ 0, 0 },
     mode: FilterMode,
-    padding: i32 = 0,
+    scale: f32 = 1,
+    size: [2]f32 = .{ 0, 0 },
+    origin: [2]f32 = .{ 0, 0 },
+    clip: [4]f32 = .{ 0, 0, 0, 0 },
+    clip_radii: [4]f32 = .{ 0, 0, 0, 0 },
+    outer_clip: [4]f32 = .{ 0, 0, 0, 0 },
+    outer_clip_radii: [4]f32 = .{ 0, 0, 0, 0 },
+    opacity: f32 = 1,
+    padding: [3]f32 = .{ 0, 0, 0 },
 };
-const FilterMode = enum(i32) { copy, downsample, upsample };
+const FilterMode = enum(i32) { copy, downsample, upsample, composite };
 
 const frame_binding = 0;
 const filter_binding = 1;
@@ -95,6 +105,7 @@ pub const Backend = struct {
             .{ "border_width", 1 },
             .{ "uv", 4 },
             .{ "kind", 1 },
+            .{ "clip_radii", 4 },
         }, 0..) |field, location| {
             c.glVertexAttribPointer(
                 location,
@@ -254,9 +265,9 @@ pub const Backend = struct {
         c.glClear(c.GL_COLOR_BUFFER_BIT);
     }
 
-    /// Runs `effects` over the innermost layer and blends the result onto
-    /// what is underneath, inside `clip` (left, top, right, bottom).
-    pub fn endLayer(backend: *Backend, effects: []const Effect, clip: [4]f32) void {
+    /// Runs `effects` over the innermost layer and lays the result over
+    /// what is underneath.
+    pub fn endLayer(backend: *Backend, effects: []const Effect, how: types.Composite) void {
         backend.open -= 1;
         const layer = backend.targets[backend.open];
 
@@ -272,7 +283,7 @@ pub const Backend = struct {
             .width = backend.width,
             .height = backend.height,
         };
-        backend.composite(layer, parent, clip);
+        backend.composite(layer, parent, how);
     }
 
     fn blurTarget(backend: *Backend, target: Target, sigma: f32) void {
@@ -283,14 +294,14 @@ pub const Backend = struct {
         var source = target;
         for (0..plan.passes) |index| {
             const level = backend.acquireLevel(index);
-            backend.filter(source, level, .downsample, plan.offset);
+            backend.blurPass(source, level, .downsample, plan.offset);
             source = level;
         }
 
         var index = plan.passes - 1;
         while (index > 0) : (index -= 1) {
             const level = backend.levels[index - 1];
-            backend.filter(source, level, .upsample, plan.offset);
+            backend.blurPass(source, level, .upsample, plan.offset);
             source = level;
         }
 
@@ -299,19 +310,17 @@ pub const Backend = struct {
             c.glBlendColor(0, 0, 0, plan.mix);
             c.glBlendFunc(c.GL_CONSTANT_ALPHA, c.GL_ONE_MINUS_CONSTANT_ALPHA);
         }
-        backend.filter(source, target, .upsample, plan.offset);
+        backend.blurPass(source, target, .upsample, plan.offset);
     }
 
-    fn composite(
-        backend: *Backend,
-        source: Target,
-        destination: Target,
-        clip: [4]f32,
-    ) void {
-        const left = @floor(clip[0]);
-        const right = @ceil(clip[2]);
-        const top = @floor(clip[1]);
-        const bottom = @ceil(clip[3]);
+    fn composite(backend: *Backend, source: Target, destination: Target, how: types.Composite) void {
+        // The shader fades the edge of the outer clip; the scissor only
+        // spares it the pixels that are far outside.
+        const left = @max(0, @floor(how.outer_clip[0]));
+        const top = @max(0, @floor(how.outer_clip[1]));
+        const right = @ceil(how.outer_clip[2]);
+        const bottom = @ceil(how.outer_clip[3]);
+        if (right <= left or bottom <= top) return;
 
         // Scissor counts y from the bottom of the framebuffer.
         const height: f32 = @floatFromInt(backend.height);
@@ -319,34 +328,45 @@ pub const Backend = struct {
         defer c.glDisable(c.GL_SCISSOR_TEST);
         c.glScissor(
             @intFromFloat(left),
-            @intFromFloat(height - bottom),
-            @intFromFloat(@max(0, right - left)),
-            @intFromFloat(@max(0, bottom - top)),
+            @intFromFloat(@max(0, height - bottom)),
+            @intFromFloat(right - left),
+            @intFromFloat(bottom - top),
         );
 
         c.glEnable(c.GL_BLEND);
         c.glBlendFunc(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
-        backend.filter(source, destination, .copy, 0);
+        backend.filter(source, destination, .{
+            .mode = .composite,
+            .scale = how.scale,
+            .size = .{
+                @floatFromInt(backend.width),
+                @floatFromInt(backend.height),
+            },
+            .origin = how.origin,
+            .clip = how.clip,
+            .clip_radii = how.clip_radii,
+            .outer_clip = how.outer_clip,
+            .outer_clip_radii = how.outer_clip_radii,
+            .opacity = how.opacity,
+        });
     }
 
-    /// Fills `destination` with `source` run through the effect shader.
-    /// Leaves `destination` bound and the viewport set to its size.
-    fn filter(
-        backend: *Backend,
-        source: Target,
-        destination: Target,
-        mode: FilterMode,
-        offset: f32,
-    ) void {
+    /// One pass of the blur. `offset` is how far apart the samples are.
+    fn blurPass(backend: *Backend, source: Target, destination: Target, mode: FilterMode, offset: f32) void {
         const source_width: f32 = @floatFromInt(source.width);
         const source_height: f32 = @floatFromInt(source.height);
-        const block: FilterBlock = .{
+        backend.filter(source, destination, .{
+            .mode = mode,
             .half_texel = .{
                 0.5 / source_width * offset,
                 0.5 / source_height * offset,
             },
-            .mode = mode,
-        };
+        });
+    }
+
+    /// Fills `destination` with `source` run through the effect shader.
+    /// Leaves `destination` bound and the viewport set to its size.
+    fn filter(backend: *Backend, source: Target, destination: Target, block: FilterBlock) void {
         c.glBindBuffer(c.GL_UNIFORM_BUFFER, backend.filter_block);
         c.glBufferSubData(c.GL_UNIFORM_BUFFER, 0, @sizeOf(FilterBlock), &block);
 
