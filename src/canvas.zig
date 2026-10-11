@@ -31,6 +31,15 @@ pub const Variation = types.Variation;
 pub const TextLayout = types.TextLayout;
 pub const Caret = types.Caret;
 
+/// Lays text out without a canvas, for measuring before there is anything
+/// to draw on. A canvas given the same one draws what it laid out.
+pub const TextSystem = text_system.System;
+
+pub const Options = struct {
+    /// Has to outlive the canvas. Null makes the canvas keep its own.
+    texts: ?*TextSystem = null,
+};
+
 const Instance = types.Instance;
 
 const Clip = struct {
@@ -118,7 +127,9 @@ const max_image_changes = 2048;
 pub const Canvas = struct {
     allocator: std.mem.Allocator,
     backend: Backend,
-    texts: text_system.System,
+    texts: *TextSystem,
+    /// Whether `texts` was made by `init` and goes away with the canvas.
+    owns_texts: bool,
     images: std.ArrayList(ImageRecord) = .empty,
     /// What the backend calls the image that the instances recorded from
     /// now on are filled with. Zero for none.
@@ -136,7 +147,7 @@ pub const Canvas = struct {
     depth: usize = 0,
 
     /// Needs a current OpenGL ES 3.0 context.
-    pub fn init(allocator: std.mem.Allocator) !Canvas {
+    pub fn init(allocator: std.mem.Allocator, options: Options) !Canvas {
         const instances = try allocator.alloc(Instance, max_instances);
         errdefer allocator.free(instances);
 
@@ -146,13 +157,20 @@ pub const Canvas = struct {
         const commands = try allocator.alloc(Command, max_layers * 2 + max_image_changes);
         errdefer allocator.free(commands);
 
-        var texts: text_system.System = try .init(allocator);
-        errdefer texts.deinit();
+        const texts = options.texts orelse try allocator.create(TextSystem);
+        errdefer if (options.texts == null) allocator.destroy(texts);
+        if (options.texts == null) texts.* = try .init(allocator);
+        errdefer if (options.texts == null) texts.deinit();
+        // The backend starts without textures, whatever was drawn into the
+        // atlases before.
+        texts.masks.invalidate();
+        texts.colors.invalidate();
 
         return .{
             .allocator = allocator,
             .backend = try Backend.init(),
             .texts = texts,
+            .owns_texts = options.texts == null,
             .instances = instances,
             .layers = layers,
             .commands = commands,
@@ -165,7 +183,10 @@ pub const Canvas = struct {
         }
         canvas.images.deinit(canvas.allocator);
         canvas.backend.deinit();
-        canvas.texts.deinit();
+        if (canvas.owns_texts) {
+            canvas.texts.deinit();
+            canvas.allocator.destroy(canvas.texts);
+        }
         canvas.allocator.free(canvas.commands);
         canvas.allocator.free(canvas.layers);
         canvas.allocator.free(canvas.instances);

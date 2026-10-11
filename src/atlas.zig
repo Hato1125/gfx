@@ -95,6 +95,13 @@ pub const Atlas = struct {
         atlas.dirty_end = atlas.height;
     }
 
+    /// Makes the next update carry everything, for a texture that has to
+    /// be filled from nothing.
+    pub fn invalidate(atlas: *Atlas) void {
+        atlas.dirty_first = 0;
+        atlas.dirty_end = atlas.height;
+    }
+
     /// What changed since the last call, or null if nothing did.
     pub fn takeUpdate(atlas: *Atlas) ?types.AtlasUpdate {
         if (atlas.dirty_end <= atlas.dirty_first) return null;
