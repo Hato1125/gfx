@@ -114,5 +114,26 @@ pub const Instance = extern struct {
     border_width: f32,
 };
 
+/// A change to a glyph atlas for the backend to mirror in its texture.
+/// `pixels` is the whole atlas, row after row. Only the rows from
+/// `first_row` up to `end_row` differ from the last update, unless the
+/// size changed, in which case everything does.
+pub const AtlasUpdate = struct {
+    kind: Kind,
+    pixels: []const u8,
+    width: u32,
+    height: u32,
+    first_row: u32,
+    end_row: u32,
+
+    pub const Kind = enum {
+        /// One byte per pixel: coverage.
+        mask,
+        /// Four bytes per pixel: red, green, blue and alpha, with the
+        /// colors already multiplied by the alpha.
+        color,
+    };
+};
+
 pub const max_depth = 32;
 pub const max_effects = 4;
