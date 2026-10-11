@@ -111,7 +111,19 @@ pub const Instance = extern struct {
     border_color: [4]f32,
     /// Left, top, right, bottom.
     clip: [4]f32,
-    border_width: f32,
+    border_width: f32 = 0,
+    /// Where a glyph sits in its atlas: left, top, right, bottom, in pixels
+    /// of the atlas.
+    uv: [4]f32 = .{ 0, 0, 0, 0 },
+    /// One of the `kind_` values. A float because that is what the vertex
+    /// layout carries.
+    kind: f32 = kind_shape,
+
+    pub const kind_shape: f32 = 0;
+    /// The mask atlas says how much of each pixel the fill covers.
+    pub const kind_glyph: f32 = 1;
+    /// The color atlas holds the colors; the fill only gives the opacity.
+    pub const kind_color_glyph: f32 = 2;
 };
 
 /// A change to a glyph atlas for the backend to mirror in its texture.

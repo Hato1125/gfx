@@ -51,6 +51,10 @@ pub const Backend = struct {
     effect_vao: c.GLuint,
     filter_block: c.GLuint,
 
+    /// Mirror the glyph atlases, in the order of `AtlasUpdate.Kind`. The
+    /// textures are zero until the first update.
+    atlases: [2]Target = @splat(.{}),
+
     width: u32 = 0,
     height: u32 = 0,
     screen: c.GLuint = 0,
@@ -70,6 +74,9 @@ pub const Backend = struct {
         try bindBlock(effect_program, "SLANG_ParameterGroup_Filter_std140", filter_binding);
         c.glUseProgram(effect_program);
         c.glUniform1i(c.glGetUniformLocation(effect_program, "source"), 0);
+        c.glUseProgram(rect_program);
+        c.glUniform1i(c.glGetUniformLocation(rect_program, "atlas"), 0);
+        c.glUniform1i(c.glGetUniformLocation(rect_program, "color_atlas"), 1);
 
         var rect_vao: c.GLuint = 0;
         c.glGenVertexArrays(1, &rect_vao);
@@ -86,6 +93,8 @@ pub const Backend = struct {
             .{ "border_color", 4 },
             .{ "clip", 4 },
             .{ "border_width", 1 },
+            .{ "uv", 4 },
+            .{ "kind", 1 },
         }, 0..) |field, location| {
             c.glVertexAttribPointer(
                 location,
@@ -115,6 +124,9 @@ pub const Backend = struct {
 
     pub fn deinit(backend: *Backend) void {
         backend.deleteTargets();
+        for (&backend.atlases) |*atlas| {
+            if (atlas.texture != 0) c.glDeleteTextures(1, &atlas.texture);
+        }
         c.glDeleteBuffers(1, &backend.filter_block);
         c.glDeleteBuffers(1, &backend.frame_block);
         c.glDeleteVertexArrays(1, &backend.effect_vao);
@@ -149,6 +161,64 @@ pub const Backend = struct {
         c.glBufferSubData(c.GL_UNIFORM_BUFFER, 0, @sizeOf(FrameBlock), &block);
     }
 
+    /// Brings a texture up to date with the atlas the text system keeps in
+    /// memory.
+    pub fn updateAtlas(backend: *Backend, update: types.AtlasUpdate) void {
+        const atlas = &backend.atlases[@intFromEnum(update.kind)];
+        const internal: c.GLint, const format: c.GLenum = switch (update.kind) {
+            .mask => .{ c.GL_R8, c.GL_RED },
+            .color => .{ c.GL_RGBA8, c.GL_RGBA },
+        };
+        const stride: usize = switch (update.kind) {
+            .mask => 1,
+            .color => 4,
+        };
+
+        // Rows of one byte pixels are not padded to four bytes.
+        c.glPixelStorei(c.GL_UNPACK_ALIGNMENT, 1);
+        defer c.glPixelStorei(c.GL_UNPACK_ALIGNMENT, 4);
+
+        if (atlas.texture == 0) {
+            c.glGenTextures(1, &atlas.texture);
+            c.glBindTexture(c.GL_TEXTURE_2D, atlas.texture);
+            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR);
+            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
+            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_CLAMP_TO_EDGE);
+            c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_CLAMP_TO_EDGE);
+        }
+        c.glBindTexture(c.GL_TEXTURE_2D, atlas.texture);
+
+        // A texture cannot grow, so a new size means a new image.
+        if (atlas.width != update.width or atlas.height != update.height) {
+            atlas.width = update.width;
+            atlas.height = update.height;
+            c.glTexImage2D(
+                c.GL_TEXTURE_2D,
+                0,
+                internal,
+                @intCast(update.width),
+                @intCast(update.height),
+                0,
+                format,
+                c.GL_UNSIGNED_BYTE,
+                update.pixels.ptr,
+            );
+            return;
+        }
+
+        c.glTexSubImage2D(
+            c.GL_TEXTURE_2D,
+            0,
+            0,
+            @intCast(update.first_row),
+            @intCast(update.width),
+            @intCast(update.end_row - update.first_row),
+            format,
+            c.GL_UNSIGNED_BYTE,
+            update.pixels[update.first_row * update.width * stride ..].ptr,
+        );
+    }
+
     /// Draws into the innermost open layer, or the screen if there is none.
     pub fn draw(backend: *Backend, instances: []const Instance) void {
         if (instances.len == 0) return;
@@ -156,6 +226,10 @@ pub const Backend = struct {
         c.glEnable(c.GL_BLEND);
         c.glBlendFunc(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
         c.glUseProgram(backend.rect_program);
+        c.glActiveTexture(c.GL_TEXTURE1);
+        c.glBindTexture(c.GL_TEXTURE_2D, backend.atlases[1].texture);
+        c.glActiveTexture(c.GL_TEXTURE0);
+        c.glBindTexture(c.GL_TEXTURE_2D, backend.atlases[0].texture);
         c.glBindVertexArray(backend.rect_vao);
         c.glBindBuffer(c.GL_ARRAY_BUFFER, backend.rect_vbo);
         c.glBufferData(
@@ -228,7 +302,12 @@ pub const Backend = struct {
         backend.filter(source, target, .upsample, plan.offset);
     }
 
-    fn composite(backend: *Backend, source: Target, destination: Target, clip: [4]f32) void {
+    fn composite(
+        backend: *Backend,
+        source: Target,
+        destination: Target,
+        clip: [4]f32,
+    ) void {
         const left = @floor(clip[0]);
         const right = @ceil(clip[2]);
         const top = @floor(clip[1]);

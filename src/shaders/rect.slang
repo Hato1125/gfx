@@ -1,5 +1,5 @@
-// One instance is one rectangle. The four corners come from the vertex
-// index, so there is no per-vertex buffer.
+// One instance is one rectangle or one glyph. The four corners come from the
+// vertex index, so there is no per-vertex buffer.
 
 struct Instance
 {
@@ -11,7 +11,14 @@ struct Instance
     // Left, top, right, bottom.
     [[vk::location(4)]] float4 clip;
     [[vk::location(5)]] float border_width;
+    // Where a glyph sits in its atlas: left, top, right, bottom, in pixels.
+    [[vk::location(6)]] float4 uv;
+    [[vk::location(7)]] float kind;
 };
+
+static const float kind_shape = 0.0;
+static const float kind_glyph = 1.0;
+static const float kind_color_glyph = 2.0;
 
 struct Varyings
 {
@@ -25,12 +32,26 @@ struct Varyings
     nointerpolation float4 border_color;
     nointerpolation float4 clip;
     nointerpolation float border_width;
+    float2 uv;
+    nointerpolation float kind;
 };
 
 cbuffer Frame
 {
     float2 viewport;
 };
+
+// One channel: how much of each pixel a glyph covers.
+Sampler2D atlas;
+// Glyphs that bring their own colors, premultiplied by alpha.
+Sampler2D color_atlas;
+
+float2 normalized(Sampler2D image, float2 pixel)
+{
+    uint width, height;
+    image.GetDimensions(width, height);
+    return pixel / float2(float(width), float(height));
+}
 
 [shader("vertex")]
 Varyings vertexMain(Instance instance, uint vertex : SV_VulkanVertexID)
@@ -51,6 +72,12 @@ Varyings vertexMain(Instance instance, uint vertex : SV_VulkanVertexID)
     output.border_color = instance.border_color;
     output.clip = instance.clip;
     output.border_width = instance.border_width;
+
+    // The extra pixel around a glyph reads the empty gap the atlas leaves
+    // between glyphs.
+    float2 across = output.local / max(instance.rect.zw, 0.001) + 0.5;
+    output.uv = lerp(instance.uv.xy, instance.uv.zw, across);
+    output.kind = instance.kind;
     return output;
 }
 
@@ -73,6 +100,19 @@ float4 premultiply(float4 color)
 [shader("fragment")]
 float4 fragmentMain(Varyings input) : SV_Target
 {
+    float2 margin = min(input.pixel - input.clip.xy, input.clip.zw - input.pixel);
+    float visible = saturate(min(margin.x, margin.y) + 0.5);
+
+    if (input.kind == kind_glyph)
+    {
+        float coverage = atlas.Sample(normalized(atlas, input.uv)).r;
+        return premultiply(input.fill) * coverage * visible;
+    }
+    if (input.kind == kind_color_glyph)
+    {
+        return color_atlas.Sample(normalized(color_atlas, input.uv)) * input.fill.a * visible;
+    }
+
     float d = roundedBox(input.local, input.half_size, input.radii);
     float shape = saturate(0.5 - d);
 
@@ -81,9 +121,6 @@ float4 fragmentMain(Varyings input) : SV_Target
     float4 paint = input.border_width > 0.0
         ? lerp(premultiply(input.border_color), fill, inside)
         : fill;
-
-    float2 margin = min(input.pixel - input.clip.xy, input.clip.zw - input.pixel);
-    float visible = saturate(min(margin.x, margin.y) + 0.5);
 
     return paint * shape * visible;
 }

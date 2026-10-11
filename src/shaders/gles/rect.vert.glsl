@@ -11,6 +11,8 @@ layout(location = 2) in vec4 instance_radii;
 layout(location = 3) in vec4 instance_border_color;
 layout(location = 4) in vec4 instance_clip;
 layout(location = 5) in float instance_border_width;
+layout(location = 6) in vec4 instance_uv;
+layout(location = 7) in float instance_kind;
 out vec2 v0;
 out vec2 v1;
 flat out vec2 v2;
@@ -19,6 +21,8 @@ flat out vec4 v4;
 flat out vec4 v5;
 flat out vec4 v6;
 flat out float v7;
+out vec2 v8;
+flat out float v9;
 
 void main()
 {
@@ -35,5 +39,7 @@ void main()
     v5 = instance_border_color;
     v6 = instance_clip;
     v7 = instance_border_width;
+    v8 = mix(instance_uv.xy, instance_uv.zw, (_44 / max(instance_rect.zw, vec2(0.001000000047497451305389404296875))) + vec2(0.5));
+    v9 = instance_kind;
 }
 
