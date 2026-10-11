@@ -14,6 +14,11 @@ pub const Rect = types.Rect;
 pub const Circle = types.Circle;
 pub const Layer = types.Layer;
 pub const Point = types.Point;
+pub const Extent = types.Extent;
+pub const Image = types.Image;
+pub const ImageData = types.ImageData;
+pub const Picture = types.Picture;
+pub const Fit = types.Fit;
 pub const Blur = types.Blur;
 pub const Effect = types.Effect;
 pub const Frame = types.Frame;
@@ -85,23 +90,40 @@ const LayerRecord = struct {
     origin: [2]f32,
 };
 
-/// `at` is the number of instances recorded before the boundary.
+/// `at` is the number of instances recorded before the command. `index`
+/// names a layer, or for `image` what the backend calls the image that
+/// the instances from here on are filled with.
 const Command = struct {
     kind: enum {
         layer_begin,
         layer_end,
+        image,
     },
-    layer: usize,
+    index: usize,
     at: usize,
+};
+
+const ImageRecord = struct {
+    /// What the backend calls it. Zero marks a slot that is free.
+    backend: u32 = 0,
+    width: u32 = 0,
+    height: u32 = 0,
 };
 
 const max_instances = 16384;
 const max_layers = 1024;
+/// How often one frame can go from drawing one image to drawing another.
+const max_image_changes = 2048;
 
 pub const Canvas = struct {
     allocator: std.mem.Allocator,
     backend: Backend,
     texts: text_system.System,
+    images: std.ArrayList(ImageRecord) = .empty,
+    /// What the backend calls the image that the instances recorded from
+    /// now on are filled with. Zero for none.
+    bound_image: u32 = 0,
+    image_changes: usize = 0,
     scale: f32 = 1,
 
     instances: []Instance,
@@ -121,7 +143,7 @@ pub const Canvas = struct {
         const layers = try allocator.alloc(LayerRecord, max_layers);
         errdefer allocator.free(layers);
 
-        const commands = try allocator.alloc(Command, max_layers * 2);
+        const commands = try allocator.alloc(Command, max_layers * 2 + max_image_changes);
         errdefer allocator.free(commands);
 
         var texts: text_system.System = try .init(allocator);
@@ -138,6 +160,10 @@ pub const Canvas = struct {
     }
 
     pub fn deinit(canvas: *Canvas) void {
+        for (canvas.images.items) |slot| {
+            if (slot.backend != 0) canvas.backend.destroyImage(slot.backend);
+        }
+        canvas.images.deinit(canvas.allocator);
         canvas.backend.deinit();
         canvas.texts.deinit();
         canvas.allocator.free(canvas.commands);
@@ -148,6 +174,8 @@ pub const Canvas = struct {
     pub fn begin(canvas: *Canvas, frame: Frame) void {
         canvas.scale = frame.scale;
         canvas.instance_count = 0;
+        canvas.bound_image = 0;
+        canvas.image_changes = 0;
         canvas.layer_count = 0;
         canvas.command_count = 0;
         canvas.depth = 0;
@@ -171,15 +199,24 @@ pub const Canvas = struct {
         if (canvas.texts.masks.takeUpdate()) |update| canvas.backend.updateAtlas(update);
         if (canvas.texts.colors.takeUpdate()) |update| canvas.backend.updateAtlas(update);
 
-        // Only layers drawn on their own interrupt the run of instances.
+        // A run of instances ends where the image changes and where a
+        // layer that is drawn on its own begins or ends.
         var drawn: usize = 0;
+        var bound: u32 = 0;
         for (canvas.commands[0..canvas.command_count]) |command| {
-            const layer = canvas.layers[command.layer];
+            if (command.kind == .image) {
+                canvas.backend.draw(canvas.instances[drawn..command.at], bound);
+                drawn = command.at;
+                bound = @intCast(command.index);
+                continue;
+            }
+            const layer = canvas.layers[command.index];
             if (!layer.separate) continue;
 
-            canvas.backend.draw(canvas.instances[drawn..command.at]);
+            canvas.backend.draw(canvas.instances[drawn..command.at], bound);
             drawn = command.at;
             switch (command.kind) {
+                .image => unreachable,
                 .layer_begin => canvas.backend.beginLayer(),
                 .layer_end => canvas.backend.endLayer(layer.effects[0..layer.effect_count], .{
                     .clip = layer.clip.bounds,
@@ -192,8 +229,122 @@ pub const Canvas = struct {
                 }),
             }
         }
-        canvas.backend.draw(canvas.instances[drawn..canvas.instance_count]);
+        canvas.backend.draw(canvas.instances[drawn..canvas.instance_count], bound);
         canvas.texts.endFrame();
+    }
+
+    /// Copies `data`, which can be let go of when this returns.
+    pub fn createImage(canvas: *Canvas, data: ImageData) !Image {
+        std.debug.assert(data.pixels.len == @as(usize, data.width) * data.height * 4);
+        const allocator = canvas.allocator;
+
+        // Everything is blended with the colors already multiplied by the
+        // alpha, so the image is brought into that form once, here.
+        const pixels = try allocator.alloc(u8, data.pixels.len);
+        defer allocator.free(pixels);
+        var offset: usize = 0;
+        while (offset < pixels.len) : (offset += 4) {
+            const alpha: u32 = data.pixels[offset + 3];
+            for (0..3) |channel| {
+                const value: u32 = data.pixels[offset + channel];
+                pixels[offset + channel] = @intCast((value * alpha + 127) / 255);
+            }
+            pixels[offset + 3] = @intCast(alpha);
+        }
+
+        const created: ImageRecord = .{
+            .backend = canvas.backend.createImage(data.width, data.height, pixels),
+            .width = data.width,
+            .height = data.height,
+        };
+        for (canvas.images.items, 0..) |*slot, index| {
+            if (slot.backend != 0) continue;
+            slot.* = created;
+            return @enumFromInt(index);
+        }
+        try canvas.images.append(allocator, created);
+        return @enumFromInt(canvas.images.items.len - 1);
+    }
+
+    /// Not while a frame that draws the image is still open.
+    pub fn destroyImage(canvas: *Canvas, handle: Image) void {
+        const slot = &canvas.images.items[@intFromEnum(handle)];
+        canvas.backend.destroyImage(slot.backend);
+        slot.* = .{};
+    }
+
+    /// In the pixels of the image.
+    pub fn imageSize(canvas: *Canvas, handle: Image) Extent {
+        const slot = canvas.images.items[@intFromEnum(handle)];
+        return .{ .width = @floatFromInt(slot.width), .height = @floatFromInt(slot.height) };
+    }
+
+    pub fn image(canvas: *Canvas, p: Picture) void {
+        if (canvas.instance_count == max_instances) {
+            std.log.err("canvas: more than {d} shapes in one frame", .{max_instances});
+            return;
+        }
+        const slot = canvas.images.items[@intFromEnum(p.image)];
+        if (slot.backend == 0 or p.width <= 0 or p.height <= 0) return;
+
+        // The part of the image to show, and the part of the box to show
+        // it in. Each fit narrows at most one of the two.
+        var box: Bounds = .{ .x = p.x, .y = p.y, .width = p.width, .height = p.height };
+        var uv: [4]f32 = .{ 0, 0, 1, 1 };
+        const image_ratio = @as(f32, @floatFromInt(slot.width)) / @as(f32, @floatFromInt(slot.height));
+        const box_ratio = p.width / p.height;
+        switch (p.fit) {
+            .fill => {},
+            .contain => if (image_ratio > box_ratio) {
+                box.height = p.width / image_ratio;
+                box.y += (p.height - box.height) / 2;
+            } else {
+                box.width = p.height * image_ratio;
+                box.x += (p.width - box.width) / 2;
+            },
+            .cover => if (image_ratio > box_ratio) {
+                const shown = box_ratio / image_ratio;
+                uv[0] = (1 - shown) / 2;
+                uv[2] = 1 - uv[0];
+            } else {
+                const shown = image_ratio / box_ratio;
+                uv[1] = (1 - shown) / 2;
+                uv[3] = 1 - uv[1];
+            },
+        }
+
+        if (canvas.bound_image != slot.backend) {
+            if (canvas.image_changes == max_image_changes) {
+                std.log.err("canvas: more than {d} changes of image in one frame", .{max_image_changes});
+                return;
+            }
+            canvas.image_changes += 1;
+            canvas.bound_image = slot.backend;
+            canvas.record(.image, slot.backend);
+        }
+
+        const state = canvas.states[canvas.depth];
+        const s = canvas.scale;
+        const width = box.width * s;
+        const height = box.height * s;
+        const limit = @min(width, height) / 2;
+        canvas.instances[canvas.instance_count] = .{
+            .rect = .{ state.x + box.x * s, state.y + box.y * s, width, height },
+            .fill = .{ 1, 1, 1, p.opacity },
+            .radii = .{
+                @min(p.corners.top_left * s, limit),
+                @min(p.corners.top_right * s, limit),
+                @min(p.corners.bottom_right * s, limit),
+                @min(p.corners.bottom_left * s, limit),
+            },
+            .border_color = vector(p.border.color),
+            .clip = state.clip.bounds,
+            .clip_radii = state.clip.radii,
+            .border_width = p.border.width * s,
+            .uv = uv,
+            .kind = Instance.kind_image,
+        };
+        canvas.instance_count += 1;
     }
 
     pub fn loadFont(canvas: *Canvas, path: [:0]const u8, options: FontOptions) !Font {
@@ -372,10 +523,10 @@ pub const Canvas = struct {
         state.clip = canvas.states[0].clip;
     }
 
-    fn record(canvas: *Canvas, kind: @FieldType(Command, "kind"), layer: usize) void {
+    fn record(canvas: *Canvas, kind: @FieldType(Command, "kind"), index: usize) void {
         canvas.commands[canvas.command_count] = .{
             .kind = kind,
-            .layer = layer,
+            .index = index,
             .at = canvas.instance_count,
         };
         canvas.command_count += 1;

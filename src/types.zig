@@ -73,6 +73,47 @@ pub const Circle = struct {
     border: Border = .{},
 };
 
+/// An image made with `Canvas.createImage`.
+pub const Image = enum(u32) { _ };
+
+/// `pixels` holds `height` rows of `width` pixels from the top down, four
+/// bytes each: red, green, blue and alpha. The colors are not multiplied
+/// by the alpha.
+pub const ImageData = struct {
+    width: u32,
+    height: u32,
+    pixels: []const u8,
+};
+
+/// What to do when the image and the box it is drawn in differ in shape.
+pub const Fit = enum {
+    /// Stretch the image over the box.
+    fill,
+    /// Show all of the image, as large as fits, centered in the box.
+    contain,
+    /// Cover all of the box, cutting off what sticks out of it.
+    cover,
+};
+
+/// `corners` and `border` belong to what is drawn, which under `contain`
+/// can be smaller than the box.
+pub const Picture = struct {
+    image: Image,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    fit: Fit = .fill,
+    corners: Corners = .{},
+    border: Border = .{},
+    opacity: f32 = 1,
+};
+
+pub const Extent = struct {
+    width: f32,
+    height: f32,
+};
+
 pub const Point = struct {
     x: f32,
     y: f32,
@@ -218,6 +259,9 @@ pub const Instance = extern struct {
     pub const kind_glyph: f32 = 1;
     /// The color atlas holds the colors; the fill only gives the opacity.
     pub const kind_color_glyph: f32 = 2;
+    /// A shape filled with the image that is bound when it is drawn; `uv`
+    /// runs from 0 to 1 over the image and the fill gives the opacity.
+    pub const kind_image: f32 = 3;
 };
 
 /// A change to a glyph atlas for the backend to mirror in its texture.

@@ -23,6 +23,7 @@ struct Instance
 static const float kind_shape = 0.0;
 static const float kind_glyph = 1.0;
 static const float kind_color_glyph = 2.0;
+static const float kind_image = 3.0;
 
 struct Varyings
 {
@@ -50,6 +51,9 @@ cbuffer Frame
 Sampler2D atlas;
 // Glyphs that bring their own colors, premultiplied by alpha.
 Sampler2D color_atlas;
+// The image the instances of kind_image are filled with, premultiplied by
+// alpha. Their uv runs from 0 to 1 over it.
+Sampler2D picture;
 
 float2 normalized(Sampler2D image, float2 pixel)
 {
@@ -113,7 +117,9 @@ float4 fragmentMain(Varyings input) : SV_Target
     float shape = saturate(0.5 - d);
 
     float inside = saturate(0.5 - (d + input.border_width));
-    float4 fill = premultiply(input.fill);
+    float4 fill = input.kind == kind_image
+        ? picture.Sample(input.uv) * input.fill.a
+        : premultiply(input.fill);
     float4 paint = input.border_width > 0.0
         ? lerp(premultiply(input.border_color), fill, inside)
         : fill;

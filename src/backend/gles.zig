@@ -87,6 +87,7 @@ pub const Backend = struct {
         c.glUseProgram(rect_program);
         c.glUniform1i(c.glGetUniformLocation(rect_program, "atlas"), 0);
         c.glUniform1i(c.glGetUniformLocation(rect_program, "color_atlas"), 1);
+        c.glUniform1i(c.glGetUniformLocation(rect_program, "picture"), 2);
 
         var rect_vao: c.GLuint = 0;
         c.glGenVertexArrays(1, &rect_vao);
@@ -230,13 +231,52 @@ pub const Backend = struct {
         );
     }
 
+    /// Makes a texture out of `height` rows of `width` RGBA pixels, from the
+    /// top down, with the colors already multiplied by the alpha. The
+    /// result is what `draw` takes; zero is never returned.
+    pub fn createImage(backend: *Backend, width: u32, height: u32, pixels: []const u8) u32 {
+        _ = backend;
+        var texture: c.GLuint = 0;
+        c.glGenTextures(1, &texture);
+        c.glBindTexture(c.GL_TEXTURE_2D, texture);
+        c.glPixelStorei(c.GL_UNPACK_ALIGNMENT, 1);
+        defer c.glPixelStorei(c.GL_UNPACK_ALIGNMENT, 4);
+        c.glTexImage2D(
+            c.GL_TEXTURE_2D,
+            0,
+            c.GL_RGBA8,
+            @intCast(width),
+            @intCast(height),
+            0,
+            c.GL_RGBA,
+            c.GL_UNSIGNED_BYTE,
+            pixels.ptr,
+        );
+        // Smaller copies, so that an image shown small does not shimmer.
+        c.glGenerateMipmap(c.GL_TEXTURE_2D);
+        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MIN_FILTER, c.GL_LINEAR_MIPMAP_LINEAR);
+        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_MAG_FILTER, c.GL_LINEAR);
+        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_S, c.GL_CLAMP_TO_EDGE);
+        c.glTexParameteri(c.GL_TEXTURE_2D, c.GL_TEXTURE_WRAP_T, c.GL_CLAMP_TO_EDGE);
+        return texture;
+    }
+
+    pub fn destroyImage(backend: *Backend, image: u32) void {
+        _ = backend;
+        c.glDeleteTextures(1, &image);
+    }
+
     /// Draws into the innermost open layer, or the screen if there is none.
-    pub fn draw(backend: *Backend, instances: []const Instance) void {
+    /// `image` is what the instances of `kind_image` are filled with; zero
+    /// if there are none.
+    pub fn draw(backend: *Backend, instances: []const Instance, image: u32) void {
         if (instances.len == 0) return;
 
         c.glEnable(c.GL_BLEND);
         c.glBlendFunc(c.GL_ONE, c.GL_ONE_MINUS_SRC_ALPHA);
         c.glUseProgram(backend.rect_program);
+        c.glActiveTexture(c.GL_TEXTURE2);
+        c.glBindTexture(c.GL_TEXTURE_2D, image);
         c.glActiveTexture(c.GL_TEXTURE1);
         c.glBindTexture(c.GL_TEXTURE_2D, backend.atlases[1].texture);
         c.glActiveTexture(c.GL_TEXTURE0);
