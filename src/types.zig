@@ -1,28 +1,56 @@
+/// Each part runs from 0 to 255. The alpha is not multiplied into the
+/// colors.
 pub const Color = struct {
-    r: f32,
-    g: f32,
-    b: f32,
-    a: f32 = 1,
+    r: u8 = 0,
+    g: u8 = 0,
+    b: u8 = 0,
+    a: u8 = 255,
 
-    pub const black: Color = .{ .r = 0, .g = 0, .b = 0 };
-    pub const white: Color = .{ .r = 1, .g = 1, .b = 1 };
-    pub const transparent: Color = .{ .r = 0, .g = 0, .b = 0, .a = 0 };
+    pub const black: Color = .{};
+    pub const white: Color = .{ .r = 255, .g = 255, .b = 255 };
+    pub const transparent: Color = .{ .a = 0 };
 
     /// Builds an opaque color from 0xRRGGBB.
     pub fn rgb(hex: u24) Color {
         return .{
-            .r = channel(hex >> 16),
-            .g = channel(hex >> 8),
-            .b = channel(hex),
+            .r = @truncate(hex >> 16),
+            .g = @truncate(hex >> 8),
+            .b = @truncate(hex),
         };
     }
 
-    pub fn alpha(color: Color, a: f32) Color {
-        return .{ .r = color.r, .g = color.g, .b = color.b, .a = a };
+    /// The same color at `opacity`, from 0 to 1.
+    pub fn alpha(color: Color, opacity: f32) Color {
+        const limited = @min(@max(opacity, 0), 1);
+        return .{
+            .r = color.r,
+            .g = color.g,
+            .b = color.b,
+            .a = @intFromFloat(@round(limited * 255)),
+        };
     }
 
-    fn channel(bits: u24) f32 {
-        return @as(f32, @floatFromInt(bits & 0xff)) / 255.0;
+    /// The color between `a` and `b` as it is seen. Each color counts by its
+    /// alpha, so one that is transparent only lets the other fade and does
+    /// not tint it on the way. A color does not go past `b` either: where a
+    /// curve overshoots, the color waits at `b`.
+    pub fn lerp(a: Color, b: Color, t: f32) Color {
+        const progress = @min(@max(t, 0), 1);
+        const weight_a = @as(f32, @floatFromInt(a.a)) * (1 - progress);
+        const weight_b = @as(f32, @floatFromInt(b.a)) * progress;
+        const total = weight_a + weight_b;
+        if (total == 0) return .{ .r = b.r, .g = b.g, .b = b.b, .a = 0 };
+        return .{
+            .r = weighted(a.r, b.r, weight_a, weight_b),
+            .g = weighted(a.g, b.g, weight_a, weight_b),
+            .b = weighted(a.b, b.b, weight_a, weight_b),
+            .a = @intFromFloat(@round(total)),
+        };
+    }
+
+    fn weighted(a: u8, b: u8, weight_a: f32, weight_b: f32) u8 {
+        const sum = @as(f32, @floatFromInt(a)) * weight_a + @as(f32, @floatFromInt(b)) * weight_b;
+        return @intFromFloat(@round(sum / (weight_a + weight_b)));
     }
 };
 

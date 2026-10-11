@@ -211,7 +211,7 @@ pub const Canvas = struct {
             } },
             .layer = 0,
         };
-        canvas.backend.beginFrame(frame.width, frame.height, frame.background);
+        canvas.backend.beginFrame(frame.width, frame.height, vector(frame.background));
     }
 
     pub fn end(canvas: *Canvas) void {
@@ -554,6 +554,12 @@ pub const Canvas = struct {
     }
 };
 
+/// The parts of a color as the shader takes them, from 0 to 1.
 fn vector(color: Color) [4]f32 {
-    return .{ color.r, color.g, color.b, color.a };
+    return .{
+        @as(f32, @floatFromInt(color.r)) / 255.0,
+        @as(f32, @floatFromInt(color.g)) / 255.0,
+        @as(f32, @floatFromInt(color.b)) / 255.0,
+        @as(f32, @floatFromInt(color.a)) / 255.0,
+    };
 }

@@ -150,7 +150,7 @@ pub const Backend = struct {
 
     /// Clears whichever framebuffer is bound; that one counts as the screen
     /// until the next call.
-    pub fn beginFrame(backend: *Backend, width: u32, height: u32, background: Color) void {
+    pub fn beginFrame(backend: *Backend, width: u32, height: u32, background: [4]f32) void {
         if (width != backend.width or height != backend.height) {
             backend.deleteTargets();
             backend.width = width;
@@ -163,7 +163,7 @@ pub const Backend = struct {
         backend.screen = @intCast(screen);
 
         c.glViewport(0, 0, @intCast(width), @intCast(height));
-        c.glClearColor(background.r, background.g, background.b, background.a);
+        c.glClearColor(background[0], background[1], background[2], background[3]);
         c.glClear(c.GL_COLOR_BUFFER_BIT);
 
         const block: FrameBlock = .{
