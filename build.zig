@@ -11,14 +11,32 @@ pub fn build(b: *std.Build) void {
     });
     const c = translate_c.createModule();
 
-    _ = b.addModule("gfx", .{
+    // FreeType, HarfBuzz and libunibreak come from the system for now.
+    const translate_text = b.addTranslateC(.{
+        .root_source_file = b.path("src/text.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const flags = b.run(&.{
+        "pkg-config", "--cflags-only-I", "freetype2", "harfbuzz", "libunibreak",
+    });
+    var include_flags = std.mem.tokenizeAny(u8, flags, " \n");
+    while (include_flags.next()) |flag| {
+        translate_text.addSystemIncludePath(.{ .cwd_relative = flag["-I".len..] });
+    }
+
+    const gfx = b.addModule("gfx", .{
         .root_source_file = b.path("src/canvas.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "c", .module = c },
+            .{ .name = "ft", .module = translate_text.createModule() },
         },
     });
+    gfx.linkSystemLibrary("freetype2", .{});
+    gfx.linkSystemLibrary("harfbuzz", .{});
+    gfx.linkSystemLibrary("libunibreak", .{});
 
     // The GLSL in src/shaders/gles is generated and checked in, so an
     // ordinary build needs neither slangc nor spirv-cross.

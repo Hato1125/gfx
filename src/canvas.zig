@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const types = @import("types.zig");
+const text_system = @import("text.zig");
 const Backend = @import("backend/gles.zig").Backend;
 
 pub const Color = types.Color;
@@ -15,6 +16,14 @@ pub const Layer = types.Layer;
 pub const Blur = types.Blur;
 pub const Effect = types.Effect;
 pub const Frame = types.Frame;
+pub const Font = types.Font;
+pub const FontOptions = types.FontOptions;
+pub const Text = types.Text;
+pub const TextStyle = types.TextStyle;
+pub const TextAlign = types.TextAlign;
+pub const Variation = types.Variation;
+pub const TextLayout = types.TextLayout;
+pub const Caret = types.Caret;
 
 const Instance = types.Instance;
 
@@ -48,6 +57,7 @@ const max_layers = 1024;
 pub const Canvas = struct {
     allocator: std.mem.Allocator,
     backend: Backend,
+    texts: text_system.System,
     scale: f32 = 1,
 
     instances: []Instance,
@@ -70,9 +80,13 @@ pub const Canvas = struct {
         const commands = try allocator.alloc(Command, max_layers * 2);
         errdefer allocator.free(commands);
 
+        var texts: text_system.System = try .init(allocator);
+        errdefer texts.deinit();
+
         return .{
             .allocator = allocator,
             .backend = try Backend.init(),
+            .texts = texts,
             .instances = instances,
             .layers = layers,
             .commands = commands,
@@ -81,6 +95,7 @@ pub const Canvas = struct {
 
     pub fn deinit(canvas: *Canvas) void {
         canvas.backend.deinit();
+        canvas.texts.deinit();
         canvas.allocator.free(canvas.commands);
         canvas.allocator.free(canvas.layers);
         canvas.allocator.free(canvas.instances);
@@ -109,6 +124,9 @@ pub const Canvas = struct {
     pub fn end(canvas: *Canvas) void {
         std.debug.assert(canvas.depth == 0);
 
+        if (canvas.texts.masks.takeUpdate()) |update| canvas.backend.updateAtlas(update);
+        if (canvas.texts.colors.takeUpdate()) |update| canvas.backend.updateAtlas(update);
+
         // Only layers with an effect interrupt the run of instances.
         var drawn: usize = 0;
         for (canvas.commands[0..canvas.command_count]) |command| {
@@ -126,6 +144,63 @@ pub const Canvas = struct {
             }
         }
         canvas.backend.draw(canvas.instances[drawn..canvas.instance_count]);
+        canvas.texts.endFrame();
+    }
+
+    pub fn loadFont(canvas: *Canvas, path: [:0]const u8, options: FontOptions) !Font {
+        return canvas.texts.loadFont(path, options);
+    }
+
+    /// Lays `string` out for the scale of the last `begin`. The canvas
+    /// keeps the layout for as long as it is asked for every few frames,
+    /// so call this again each frame rather than holding on to the result.
+    /// Null if the style names no font or there is no memory left.
+    pub fn textLayout(canvas: *Canvas, string: []const u8, style: TextStyle) ?*TextLayout {
+        return canvas.texts.cached(string, style, canvas.scale);
+    }
+
+    /// Like `textLayout`, but the layout belongs to the caller, who gives
+    /// it to `destroyTextLayout` when done. Worth it for text that stays
+    /// the same over many frames: nothing is looked up to draw it.
+    pub fn createTextLayout(canvas: *Canvas, string: []const u8, style: TextStyle) !*TextLayout {
+        return canvas.texts.create(string, style, canvas.scale);
+    }
+
+    pub fn destroyTextLayout(canvas: *Canvas, layout: *TextLayout) void {
+        canvas.texts.destroy(layout);
+    }
+
+    pub fn text(canvas: *Canvas, t: Text) void {
+        const layout = t.layout;
+        canvas.texts.prepare(layout);
+        if (canvas.instance_count + layout.glyphs.len > max_instances) {
+            std.log.err("canvas: more than {d} shapes in one frame", .{max_instances});
+            return;
+        }
+
+        // Glyphs are drawn for whole pixels, so the layout starts on one.
+        const state = canvas.states[canvas.depth];
+        const left = @round(state.x + t.x * canvas.scale);
+        const top = @round(state.y + t.y * canvas.scale);
+        const fill = vector(t.color);
+
+        for (layout.glyphs) |glyph| {
+            canvas.instances[canvas.instance_count] = .{
+                .rect = .{ left + glyph.x, top + glyph.y, glyph.width, glyph.height },
+                .fill = fill,
+                .radii = .{ 0, 0, 0, 0 },
+                .border_color = .{ 0, 0, 0, 0 },
+                .clip = state.clip,
+                .uv = .{
+                    glyph.atlas_x,
+                    glyph.atlas_y,
+                    glyph.atlas_x + glyph.width,
+                    glyph.atlas_y + glyph.height,
+                },
+                .kind = glyph.kind,
+            };
+            canvas.instance_count += 1;
+        }
     }
 
     pub fn rect(canvas: *Canvas, r: Rect) void {

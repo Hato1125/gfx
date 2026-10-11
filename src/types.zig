@@ -92,6 +92,62 @@ pub const Effect = union(enum) {
     blur: Blur,
 };
 
+/// A font loaded with `Canvas.loadFont`.
+pub const Font = enum(u16) { _ };
+
+pub const FontOptions = struct {
+    /// Which face to take from a file that holds several.
+    index: u32 = 0,
+};
+
+/// A value for one axis of a variable font, such as `"FILL"` or `"wdth"`.
+pub const Variation = struct {
+    tag: *const [4]u8,
+    value: f32,
+};
+
+pub const TextAlign = enum { start, center, end };
+
+/// `fonts` are tried in order for every character, so a later one only
+/// supplies what the earlier ones lack. `size` is the height of the em box.
+pub const TextStyle = struct {
+    fonts: []const Font,
+    size: f32 = 16,
+    /// 400 is regular and 700 is bold. The same as a variation of `"wght"`.
+    weight: f32 = 400,
+    /// Only variable fonts follow these and `weight`, each as far as its
+    /// axes go; any other font is drawn the one way it comes. An axis for
+    /// the optical size follows `size` unless it is named here.
+    variations: []const Variation = &.{},
+    /// The distance from one baseline to the next. Null takes it from the
+    /// first font.
+    line_height: ?f32 = null,
+    /// Added after every character.
+    tracking: f32 = 0,
+    /// Lines are broken to fit. Null only breaks at line feeds.
+    width: ?f32 = null,
+    /// Within `width`, or within the longest line when that is null.
+    alignment: TextAlign = .start,
+};
+
+/// `x` and `y` are the top left of the layout.
+pub const Text = struct {
+    x: f32,
+    y: f32,
+    layout: *TextLayout,
+    color: Color = .white,
+};
+
+pub const TextLayout = @import("text.zig").Layout;
+
+/// Where the caret stands before a character: the top of the line and how
+/// tall the line is.
+pub const Caret = struct {
+    x: f32,
+    y: f32,
+    height: f32,
+};
+
 /// `width` and `height` are in pixels. Every coordinate passed to the
 /// drawing functions is multiplied by `scale` to get pixels.
 pub const Frame = struct {
