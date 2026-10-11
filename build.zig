@@ -28,8 +28,10 @@ pub fn build(b: *std.Build) void {
             .{ .name = "vertex", .extension = "vert", .varyings = "out" },
             .{ .name = "fragment", .extension = "frag", .varyings = "in" },
         }) |stage| {
-            const compile = b.addSystemCommand(&.{
-                "slangc",  b.fmt("src/shaders/{s}.slang", .{name}),
+            const compile = b.addSystemCommand(&.{"slangc"});
+            // Passed as a file so that the step runs again when it changes.
+            compile.addFileArg(b.path(b.fmt("src/shaders/{s}.slang", .{name})));
+            compile.addArgs(&.{
                 "-target", "spirv",
                 "-entry",  b.fmt("{s}Main", .{stage.name}),
                 "-stage",  stage.name,
