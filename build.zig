@@ -11,19 +11,56 @@ pub fn build(b: *std.Build) void {
     });
     const c = translate_c.createModule();
 
-    // FreeType, HarfBuzz and libunibreak come from the system for now.
+    // FreeType, HarfBuzz and libunibreak are built from source, so that
+    // nothing has to be installed to build this.
+    // They are optimized whatever the rest is built as: unoptimized, laying
+    // text out and drawing glyphs takes about twice as long.
+    const library_optimize: std.builtin.OptimizeMode =
+        if (optimize == .Debug) .ReleaseFast else optimize;
+    const freetype = b.dependency("freetype", .{
+        .target = target,
+        .optimize = library_optimize,
+        // The bitmaps of color emoji are stored as PNG.
+        .@"enable-libpng" = true,
+    });
+    const harfbuzz = b.dependency("harfbuzz", .{
+        .target = target,
+        .optimize = library_optimize,
+    });
+    const unibreak_source = b.dependency("libunibreak", .{}).path("src");
+    const unibreak = b.addLibrary(.{
+        .name = "unibreak",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = library_optimize,
+            .link_libc = true,
+        }),
+    });
+    unibreak.root_module.addCSourceFiles(.{
+        .root = unibreak_source,
+        .files = &.{
+            "unibreakbase.c",
+            "unibreakdef.c",
+            "linebreak.c",
+            "linebreakdata.c",
+            "linebreakdef.c",
+            "eastasianwidthdef.c",
+            "emojidef.c",
+            "graphemebreak.c",
+            "wordbreak.c",
+        },
+    });
+
     const translate_text = b.addTranslateC(.{
         .root_source_file = b.path("src/text.h"),
         .target = target,
         .optimize = optimize,
     });
-    const flags = b.run(&.{
-        "pkg-config", "--cflags-only-I", "freetype2", "harfbuzz", "libunibreak",
-    });
-    var include_flags = std.mem.tokenizeAny(u8, flags, " \n");
-    while (include_flags.next()) |flag| {
-        translate_text.addSystemIncludePath(.{ .cwd_relative = flag["-I".len..] });
-    }
+    // The packages wrap the original sources, which hold the headers.
+    translate_text.addIncludePath(freetype.builder.dependency("freetype", .{}).path("include"));
+    translate_text.addIncludePath(harfbuzz.builder.dependency("harfbuzz", .{}).path("src"));
+    translate_text.addIncludePath(unibreak_source);
 
     const gfx = b.addModule("gfx", .{
         .root_source_file = b.path("src/canvas.zig"),
@@ -34,9 +71,9 @@ pub fn build(b: *std.Build) void {
             .{ .name = "ft", .module = translate_text.createModule() },
         },
     });
-    gfx.linkSystemLibrary("freetype2", .{});
-    gfx.linkSystemLibrary("harfbuzz", .{});
-    gfx.linkSystemLibrary("libunibreak", .{});
+    gfx.linkLibrary(harfbuzz.artifact("harfbuzz"));
+    gfx.linkLibrary(freetype.artifact("freetype"));
+    gfx.linkLibrary(unibreak);
 
     // The GLSL in src/shaders/gles is generated and checked in, so an
     // ordinary build needs neither slangc nor spirv-cross.

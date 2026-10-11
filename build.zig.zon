@@ -3,7 +3,20 @@
     .version = "0.0.0",
     .fingerprint = 0xdfa03198cd6ba1eb,
     .minimum_zig_version = "0.16.0",
-    .dependencies = .{},
+    .dependencies = .{
+        .freetype = .{
+            .url = "git+https://github.com/allyourcodebase/freetype.git#884fd2235e6ae1ec4306eda30b3259f20930ed2e",
+            .hash = "freetype-2.14.3-C3-WdXSKAAB-kHs4qgRoeoFnRkNQn6M_SSlUGZ6ywgBQ",
+        },
+        .harfbuzz = .{
+            .url = "git+https://github.com/allyourcodebase/harfbuzz.git#d055840ecefefcd57f5ddeb2fa8c83fafed1a40b",
+            .hash = "harfbuzz-14.1.0-Ip1VAuGZAAC1jdxPHOMPoHyi-50Hm_q4bveaVflELHGw",
+        },
+        .libunibreak = .{
+            .url = "https://github.com/adah1972/libunibreak/archive/refs/tags/libunibreak_7_0.tar.gz",
+            .hash = "N-V-__8AAGrzJABrqVC-jAIdNgdUpt74uCKdc5i9rj-j0_NG",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
