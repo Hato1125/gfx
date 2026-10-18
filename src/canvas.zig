@@ -88,6 +88,18 @@ const State = struct {
     y: f32,
     clip: Clip,
     layer: usize,
+    /// Whether what lies outside `clip` can be left out. Not inside a
+    /// separate layer, which is moved, scaled or blurred after it is drawn,
+    /// so that what is outside its clip may still reach what is inside.
+    cull: bool = true,
+
+    /// Whether a shape in pixels, as left, top, right and bottom, cannot
+    /// show.
+    fn hides(state: State, left: f32, top: f32, right: f32, bottom: f32) bool {
+        if (!state.cull) return false;
+        const clip = state.clip.bounds;
+        return right <= clip[0] or left >= clip[2] or bottom <= clip[1] or top >= clip[3];
+    }
 };
 
 const LayerRecord = struct {
@@ -306,6 +318,10 @@ pub const Canvas = struct {
     }
 
     pub fn image(canvas: *Canvas, p: Picture) void {
+        const placed = canvas.states[canvas.depth];
+        const at_x = placed.x + p.x * canvas.scale;
+        const at_y = placed.y + p.y * canvas.scale;
+        if (placed.hides(at_x, at_y, at_x + p.width * canvas.scale, at_y + p.height * canvas.scale)) return;
         if (canvas.instance_count == max_instances) {
             std.log.err("canvas: more than {d} shapes in one frame", .{max_instances});
             return;
@@ -399,18 +415,27 @@ pub const Canvas = struct {
     pub fn text(canvas: *Canvas, t: Text) void {
         const layout = t.layout;
         canvas.texts.prepare(layout);
-        if (canvas.instance_count + layout.glyphs.len > max_instances) {
-            std.log.err("canvas: more than {d} shapes in one frame", .{max_instances});
-            return;
-        }
 
         // Glyphs are drawn for whole pixels, so the layout starts on one.
         const state = canvas.states[canvas.depth];
         const left = @round(state.x + t.x * canvas.scale);
         const top = @round(state.y + t.y * canvas.scale);
+        // A glyph may reach beyond the box of the layout by a little.
+        const reach = layout.line_height;
+        if (state.hides(
+            left - reach,
+            top - reach,
+            left + layout.width * canvas.scale + reach,
+            top + layout.height * canvas.scale + reach,
+        )) return;
         const fill = vector(t.color);
 
         for (layout.glyphs) |glyph| {
+            if (state.hides(left + glyph.x, top + glyph.y, left + glyph.x + glyph.width, top + glyph.y + glyph.height)) continue;
+            if (canvas.instance_count == max_instances) {
+                std.log.err("canvas: more than {d} shapes in one frame", .{max_instances});
+                return;
+            }
             canvas.instances[canvas.instance_count] = .{
                 .rect = .{ left + glyph.x, top + glyph.y, glyph.width, glyph.height },
                 .fill = fill,
@@ -431,19 +456,22 @@ pub const Canvas = struct {
     }
 
     pub fn rect(canvas: *Canvas, r: Rect) void {
+        const state = canvas.states[canvas.depth];
+        const s = canvas.scale;
+        const width = r.width * s;
+        const height = r.height * s;
+        const left = state.x + r.x * s;
+        const top = state.y + r.y * s;
+        if (state.hides(left, top, left + width, top + height)) return;
         if (canvas.instance_count == max_instances) {
             std.log.err("canvas: more than {d} shapes in one frame", .{max_instances});
             return;
         }
 
-        const state = canvas.states[canvas.depth];
-        const s = canvas.scale;
-        const width = r.width * s;
-        const height = r.height * s;
         const limit = @min(width, height) / 2;
 
         canvas.instances[canvas.instance_count] = .{
-            .rect = .{ state.x + r.x * s, state.y + r.y * s, width, height },
+            .rect = .{ left, top, width, height },
             .fill = vector(r.color),
             .radii = .{
                 @min(r.corners.top_left * s, limit),
@@ -522,6 +550,7 @@ pub const Canvas = struct {
             // so nothing inside it has to be.
             .clip = if (canvas.layers[record_index].separate) frame else parent.clip.intersect(own),
             .layer = record_index,
+            .cull = parent.cull and !canvas.layers[record_index].separate,
         };
     }
 
@@ -547,6 +576,7 @@ pub const Canvas = struct {
 
         layer.separate = true;
         state.clip = canvas.states[0].clip;
+        state.cull = false;
     }
 
     fn record(canvas: *Canvas, kind: @FieldType(Command, "kind"), index: usize) void {
