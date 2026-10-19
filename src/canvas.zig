@@ -21,6 +21,10 @@ pub const Picture = types.Picture;
 pub const Fit = types.Fit;
 pub const Blur = types.Blur;
 pub const Effect = types.Effect;
+pub const Shader = types.Shader;
+pub const ShaderSource = types.ShaderSource;
+pub const ShaderEffect = types.ShaderEffect;
+pub const max_shader_params = types.max_shader_params;
 pub const Frame = types.Frame;
 pub const Font = types.Font;
 pub const FontOptions = types.FontOptions;
@@ -103,7 +107,7 @@ const State = struct {
 };
 
 const LayerRecord = struct {
-    effects: [types.max_effects]Effect = undefined,
+    effects: [types.max_effects]types.Pass = undefined,
     effect_count: usize = 0,
     /// Drawn on its own and laid over the rest afterwards.
     separate: bool,
@@ -148,6 +152,9 @@ pub const Canvas = struct {
     /// Whether `texts` was made by `init` and goes away with the canvas.
     owns_texts: bool,
     images: std.ArrayList(ImageRecord) = .empty,
+    /// What the backend calls each shader, by handle. Zero marks a slot
+    /// that is free.
+    shaders: std.ArrayList(u32) = .empty,
     /// What the backend calls the image that the instances recorded from
     /// now on are filled with. Zero for none.
     bound_image: u32 = 0,
@@ -199,6 +206,10 @@ pub const Canvas = struct {
             if (slot.backend != 0) canvas.backend.destroyImage(slot.backend);
         }
         canvas.images.deinit(canvas.allocator);
+        for (canvas.shaders.items) |program| {
+            if (program != 0) canvas.backend.destroyShader(program);
+        }
+        canvas.shaders.deinit(canvas.allocator);
         canvas.backend.deinit();
         if (canvas.owns_texts) {
             canvas.texts.deinit();
@@ -228,7 +239,12 @@ pub const Canvas = struct {
             } },
             .layer = 0,
         };
-        canvas.backend.beginFrame(frame.width, frame.height, vector(frame.background));
+        canvas.backend.beginFrame(
+            frame.width,
+            frame.height,
+            vector(frame.background),
+            frame.time,
+        );
     }
 
     pub fn end(canvas: *Canvas) void {
@@ -256,15 +272,19 @@ pub const Canvas = struct {
             switch (command.kind) {
                 .image => unreachable,
                 .layer_begin => canvas.backend.beginLayer(),
-                .layer_end => canvas.backend.endLayer(layer.effects[0..layer.effect_count], .{
-                    .clip = layer.clip.bounds,
-                    .clip_radii = layer.clip.radii,
-                    .outer_clip = layer.outer_clip.bounds,
-                    .outer_clip_radii = layer.outer_clip.radii,
-                    .opacity = layer.opacity,
-                    .scale = layer.scale,
-                    .origin = layer.origin,
-                }),
+                .layer_end => canvas.backend.endLayer(
+                    layer.effects[0..layer.effect_count],
+                    canvas.shaders.items,
+                    .{
+                        .clip = layer.clip.bounds,
+                        .clip_radii = layer.clip.radii,
+                        .outer_clip = layer.outer_clip.bounds,
+                        .outer_clip_radii = layer.outer_clip.radii,
+                        .opacity = layer.opacity,
+                        .scale = layer.scale,
+                        .origin = layer.origin,
+                    },
+                ),
             }
         }
         canvas.backend.draw(canvas.instances[drawn..canvas.instance_count], bound);
@@ -302,6 +322,27 @@ pub const Canvas = struct {
         }
         try canvas.images.append(allocator, created);
         return @enumFromInt(canvas.images.items.len - 1);
+    }
+
+    /// Compiles `source`, which the effects of later layers can then run.
+    /// The error log goes to `std.log`.
+    pub fn createShader(canvas: *Canvas, source: ShaderSource) !Shader {
+        const program = try canvas.backend.createShader(source.glsl_es);
+        errdefer canvas.backend.destroyShader(program);
+        for (canvas.shaders.items, 0..) |*slot, index| {
+            if (slot.* != 0) continue;
+            slot.* = program;
+            return @enumFromInt(index);
+        }
+        try canvas.shaders.append(canvas.allocator, program);
+        return @enumFromInt(canvas.shaders.items.len - 1);
+    }
+
+    /// Not while a frame that runs the shader is still open.
+    pub fn destroyShader(canvas: *Canvas, handle: Shader) void {
+        const slot = &canvas.shaders.items[@intFromEnum(handle)];
+        canvas.backend.destroyShader(slot.*);
+        slot.* = 0;
     }
 
     /// Not while a frame that draws the image is still open.
@@ -571,6 +612,13 @@ pub const Canvas = struct {
         std.debug.assert(layer.effect_count < types.max_effects);
         layer.effects[layer.effect_count] = switch (e) {
             .blur => |blur| .{ .blur = .{ .sigma = blur.sigma * canvas.scale } },
+            .shader => |run| blk: {
+                std.debug.assert(canvas.shaders.items[@intFromEnum(run.shader)] != 0);
+                var params: [types.max_shader_params][4]f32 = @splat(.{ 0, 0, 0, 0 });
+                const count = @min(run.params.len, params.len);
+                @memcpy(params[0..count], run.params[0..count]);
+                break :blk .{ .shader = .{ .shader = run.shader, .params = params } };
+            },
         };
         layer.effect_count += 1;
 

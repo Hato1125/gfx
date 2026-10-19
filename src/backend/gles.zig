@@ -6,7 +6,7 @@ const types = @import("../types.zig");
 const blur = @import("../blur.zig");
 
 const Color = types.Color;
-const Effect = types.Effect;
+const Pass = types.Pass;
 const Instance = types.Instance;
 
 // Generated from the .slang files by `zig build shaders`.
@@ -38,8 +38,43 @@ const FilterBlock = extern struct {
 };
 const FilterMode = enum(i32) { copy, downsample, upsample, composite };
 
+// The layout of the `Custom` block that a shader of an effect reads, which
+// types.ShaderSource describes.
+const CustomBlock = extern struct {
+    params: [types.max_shader_params][4]f32,
+    size: [2]f32,
+    time: f32,
+    padding: f32 = 0,
+};
+
+// What comes before and after the source of a shader of an effect. The
+// `#line` makes the errors count from the first line of the source.
+const custom_prefix =
+    \\#version 300 es
+    \\precision highp float;
+    \\precision highp int;
+    \\uniform sampler2D source;
+    \\layout(std140) uniform Custom {
+    \\    vec4 params[4];
+    \\    vec2 size;
+    \\    float time;
+    \\};
+    \\in vec2 v0;
+    \\layout(location = 0) out vec4 result;
+    \\#line 1
+    \\
+;
+const custom_suffix =
+    \\
+    \\void main() {
+    \\    result = effect(texture(source, v0), v0);
+    \\}
+    \\
+;
+
 const frame_binding = 0;
 const filter_binding = 1;
+const custom_binding = 2;
 
 /// An offscreen image.
 const Target = struct {
@@ -62,6 +97,10 @@ pub const Backend = struct {
     /// rectangle's attributes enabled.
     effect_vao: GL.Uint,
     filter_block: GL.Uint,
+    custom_block: GL.Uint,
+    /// What the shaders of effects write into while they read a layer.
+    scratch: Target = .{},
+    time: f32 = 0,
 
     /// Mirror the glyph atlases, in the order of `AtlasUpdate.Kind`. The
     /// textures are zero until the first update.
@@ -139,6 +178,7 @@ pub const Backend = struct {
             .effect_program = effect_program,
             .effect_vao = effect_vao,
             .filter_block = createBlock(gl, FilterBlock, filter_binding),
+            .custom_block = createBlock(gl, CustomBlock, custom_binding),
         };
     }
 
@@ -148,6 +188,7 @@ pub const Backend = struct {
         for (&backend.atlases) |*atlas| {
             if (atlas.texture != 0) gl.DeleteTextures(1, &atlas.texture);
         }
+        gl.DeleteBuffers(1, &backend.custom_block);
         gl.DeleteBuffers(1, &backend.filter_block);
         gl.DeleteBuffers(1, &backend.frame_block);
         gl.DeleteVertexArrays(1, &backend.effect_vao);
@@ -159,8 +200,9 @@ pub const Backend = struct {
 
     /// Clears whichever framebuffer is bound; that one counts as the screen
     /// until the next call.
-    pub fn beginFrame(backend: *Backend, width: u32, height: u32, background: [4]f32) void {
+    pub fn beginFrame(backend: *Backend, width: u32, height: u32, background: [4]f32, time: f32) void {
         const gl = &backend.gl;
+        backend.time = time;
         if (width != backend.width or height != backend.height) {
             backend.deleteTargets();
             backend.width = width;
@@ -276,6 +318,28 @@ pub const Backend = struct {
         backend.gl.DeleteTextures(1, &image);
     }
 
+    /// Compiles `source`, which defines the `effect` function of
+    /// types.ShaderSource. The result is what `endLayer` finds the shader
+    /// by; zero is never returned.
+    pub fn createShader(backend: *Backend, source: []const u8) !u32 {
+        const gl = &backend.gl;
+        const vertex = try compileShader(gl, GL.VERTEX_SHADER, &.{effect_vertex});
+        defer gl.DeleteShader(vertex);
+        const fragment = try compileShader(gl, GL.FRAGMENT_SHADER, &.{ custom_prefix, source, custom_suffix });
+        defer gl.DeleteShader(fragment);
+
+        const program = try linkProgram(gl, vertex, fragment);
+        errdefer gl.DeleteProgram(program);
+        // A shader that reads none of the block has no block to bind.
+        const index = gl.GetUniformBlockIndex(program, "Custom");
+        if (index != GL.INVALID_INDEX) gl.UniformBlockBinding(program, index, custom_binding);
+        return program;
+    }
+
+    pub fn destroyShader(backend: *Backend, program: u32) void {
+        backend.gl.DeleteProgram(program);
+    }
+
     /// Draws into the innermost open layer, or the screen if there is none.
     /// `image` is what the instances of `kind_image` are filled with; zero
     /// if there are none.
@@ -319,12 +383,23 @@ pub const Backend = struct {
 
     /// Runs `effects` over the innermost layer and lays the result over
     /// what is underneath.
-    pub fn endLayer(backend: *Backend, effects: []const Effect, how: types.Composite) void {
+    /// `programs` is what `createShader` returned, by the handle of the
+    /// shader.
+    pub fn endLayer(backend: *Backend, effects: []const Pass, programs: []const u32, how: types.Composite) void {
         backend.open -= 1;
-        const layer = backend.targets[backend.open];
+        const own = backend.targets[backend.open];
 
+        // A shader cannot read what it writes, so each one goes from the
+        // layer to the scratch image or back, and the result is whichever
+        // holds the last.
+        var layer = own;
         for (effects) |effect| switch (effect) {
             .blur => |b| backend.blurTarget(layer, b.sigma),
+            .shader => |run| {
+                const next = if (layer.texture == own.texture) backend.acquireScratch() else own;
+                backend.runShader(layer, next, programs[@intFromEnum(run.shader)], run.params);
+                layer = next;
+            },
         };
 
         const parent: Target = .{
@@ -336,6 +411,41 @@ pub const Backend = struct {
             .height = backend.height,
         };
         backend.composite(layer, parent, how);
+    }
+
+    /// Fills `destination` with `source` run through `program`.
+    fn runShader(
+        backend: *Backend,
+        source: Target,
+        destination: Target,
+        program: u32,
+        params: [types.max_shader_params][4]f32,
+    ) void {
+        const gl = &backend.gl;
+        const block: CustomBlock = .{
+            .params = params,
+            .size = .{ @floatFromInt(backend.width), @floatFromInt(backend.height) },
+            .time = backend.time,
+        };
+        gl.BindBuffer(GL.UNIFORM_BUFFER, backend.custom_block);
+        gl.BufferSubData(GL.UNIFORM_BUFFER, 0, @sizeOf(CustomBlock), &block);
+
+        // The shader gives the whole image, so nothing is blended into it.
+        gl.Disable(GL.BLEND);
+        gl.BindFramebuffer(GL.FRAMEBUFFER, destination.framebuffer);
+        gl.Viewport(0, 0, @intCast(destination.width), @intCast(destination.height));
+        gl.UseProgram(program);
+        gl.ActiveTexture(GL.TEXTURE0);
+        gl.BindTexture(GL.TEXTURE_2D, source.texture);
+        gl.BindVertexArray(backend.effect_vao);
+        gl.DrawArrays(GL.TRIANGLE_STRIP, 0, 4);
+    }
+
+    fn acquireScratch(backend: *Backend) Target {
+        if (backend.scratch.texture == 0) {
+            backend.scratch = createTarget(&backend.gl, backend.width, backend.height);
+        }
+        return backend.scratch;
     }
 
     fn blurTarget(backend: *Backend, target: Target, sigma: f32) void {
@@ -450,6 +560,7 @@ pub const Backend = struct {
     fn deleteTargets(backend: *Backend) void {
         for (&backend.targets) |*target| deleteTarget(&backend.gl, target);
         for (&backend.levels) |*level| deleteTarget(&backend.gl, level);
+        deleteTarget(&backend.gl, &backend.scratch);
     }
 };
 
@@ -526,11 +637,14 @@ fn createProgram(
     vertex_source: [*:0]const u8,
     fragment_source: [*:0]const u8,
 ) !GL.Uint {
-    const vertex = try compileShader(gl, GL.VERTEX_SHADER, vertex_source);
+    const vertex = try compileShader(gl, GL.VERTEX_SHADER, &.{std.mem.span(vertex_source)});
     defer gl.DeleteShader(vertex);
-    const fragment = try compileShader(gl, GL.FRAGMENT_SHADER, fragment_source);
+    const fragment = try compileShader(gl, GL.FRAGMENT_SHADER, &.{std.mem.span(fragment_source)});
     defer gl.DeleteShader(fragment);
+    return linkProgram(gl, vertex, fragment);
+}
 
+fn linkProgram(gl: *const GL.Functions, vertex: GL.Uint, fragment: GL.Uint) !GL.Uint {
     const program = gl.CreateProgram();
     gl.AttachShader(program, vertex);
     gl.AttachShader(program, fragment);
@@ -542,14 +656,26 @@ fn createProgram(
         var log: [512:0]u8 = @splat(0);
         gl.GetProgramInfoLog(program, log.len, null, &log);
         std.log.err("gles: link: {s}", .{std.mem.sliceTo(&log, 0)});
+        gl.DeleteProgram(program);
         return error.ShaderLink;
     }
     return program;
 }
 
-fn compileShader(gl: *const GL.Functions, kind: GL.Enum, source: [*:0]const u8) !GL.Uint {
+/// Compiles the strings together as one source, which keeps the source of
+/// a shader from being copied to be put between two others.
+fn compileShader(gl: *const GL.Functions, kind: GL.Enum, parts: []const []const u8) !GL.Uint {
+    const max_parts = 4;
+    std.debug.assert(parts.len <= max_parts);
+    var pointers: [max_parts][*c]const u8 = undefined;
+    var lengths: [max_parts]GL.Int = undefined;
+    for (parts, 0..) |part, index| {
+        pointers[index] = part.ptr;
+        lengths[index] = @intCast(part.len);
+    }
+
     const shader = gl.CreateShader(kind);
-    gl.ShaderSource(shader, 1, &source, null);
+    gl.ShaderSource(shader, @intCast(parts.len), &pointers, &lengths);
     gl.CompileShader(shader);
 
     var compiled: GL.Int = GL.FALSE;
@@ -558,6 +684,7 @@ fn compileShader(gl: *const GL.Functions, kind: GL.Enum, source: [*:0]const u8) 
         var log: [512:0]u8 = @splat(0);
         gl.GetShaderInfoLog(shader, log.len, null, &log);
         std.log.err("gles: compile: {s}", .{std.mem.sliceTo(&log, 0)});
+        gl.DeleteShader(shader);
         return error.ShaderCompile;
     }
     return shader;

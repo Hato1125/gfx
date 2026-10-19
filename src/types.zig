@@ -191,9 +191,56 @@ pub const Blur = struct {
     sigma: f32,
 };
 
+/// A fragment shader made with `Canvas.createShader`.
+pub const Shader = enum(u16) { _ };
+
+/// What a shader is made from. The source is GLSL ES 3.0 that defines
+///
+///     vec4 effect(vec4 source, vec2 uv)
+///
+/// which gets the color of the layer at `uv`, with the colors multiplied by
+/// the alpha and `uv` running from 0 to 1 from the bottom left, and returns
+/// the color to show there in the same form. Everything before it is added
+/// by the canvas:
+///
+///     uniform sampler2D source;  // The whole layer, for sampling around.
+///     uniform Custom {
+///         vec4 params[4];        // Whatever the effect passes.
+///         vec2 size;             // The frame in pixels.
+///         float time;            // `Frame.time`.
+///     };
+///
+/// The line numbers of a compile error count from the first line of the
+/// source.
+pub const ShaderSource = struct {
+    glsl_es: []const u8,
+};
+
+/// The most vec4 values that an effect passes to a shader.
+pub const max_shader_params = 4;
+
+/// Runs `shader` over the layer.
+pub const ShaderEffect = struct {
+    shader: Shader,
+    /// The first `max_shader_params` are used; the rest of `params` in the
+    /// shader are zero.
+    params: []const [4]f32 = &.{},
+};
+
 /// Applied to everything drawn between `push` and the matching `pop`.
 pub const Effect = union(enum) {
     blur: Blur,
+    shader: ShaderEffect,
+};
+
+/// An effect as the canvas records it for a backend, in pixels and with the
+/// shader looked up.
+pub const Pass = union(enum) {
+    blur: Blur,
+    shader: struct {
+        shader: Shader,
+        params: [max_shader_params][4]f32,
+    },
 };
 
 /// A font loaded with `Canvas.loadFont`.
@@ -259,6 +306,8 @@ pub const Frame = struct {
     height: u32,
     scale: f32 = 1,
     background: Color = .black,
+    /// In seconds, for the shaders of effects. Only differences matter.
+    time: f32 = 0,
 };
 
 /// What the canvas hands to a backend for every rectangle, already in
