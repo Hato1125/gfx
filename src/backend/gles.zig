@@ -229,7 +229,7 @@ pub const Backend = struct {
     /// memory.
     pub fn updateAtlas(backend: *Backend, update: types.AtlasUpdate) void {
         const gl = &backend.gl;
-        const atlas = &backend.atlases[@intFromEnum(update.kind)];
+        const atlas = &backend.atlases[@backingInt(update.kind)];
         const internal: GL.Int, const format: GL.Enum = switch (update.kind) {
             .mask => .{ GL.R8, GL.RED },
             .color => .{ GL.RGBA8, GL.RGBA },
@@ -397,7 +397,7 @@ pub const Backend = struct {
             .blur => |b| backend.blurTarget(layer, b.sigma),
             .shader => |run| {
                 const next = if (layer.texture == own.texture) backend.acquireScratch() else own;
-                backend.runShader(layer, next, programs[@intFromEnum(run.shader)], run.params);
+                backend.runShader(layer, next, programs[@backingInt(run.shader)], run.params);
                 layer = next;
             },
         };

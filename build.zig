@@ -8,8 +8,8 @@ pub fn build(b: *std.Build) void {
     // nothing has to be installed to build this.
     // They are optimized whatever the rest is built as: unoptimized, laying
     // text out and drawing glyphs takes about twice as long.
-    const library_optimize: std.builtin.OptimizeMode =
-        if (optimize == .Debug) .ReleaseFast else optimize;
+    const library_optimize: std.lang.Optimize =
+        if (optimize == .debug) .fast else optimize;
     const freetype = b.dependency("freetype", .{
         .target = target,
         .optimize = library_optimize,
@@ -99,7 +99,10 @@ pub fn build(b: *std.Build) void {
             convert.addFileArg(spirv);
             convert.addArgs(&.{
                 "--output",
-                b.pathFromRoot(b.fmt("src/shaders/gles/{s}.{s}.glsl", .{ name, stage.extension })),
+                b.root.joinString(
+                    b.allocator,
+                    b.fmt("src/shaders/gles/{s}.{s}.glsl", .{ name, stage.extension }),
+                ) catch @panic("OOM"),
             });
             convert.has_side_effects = true;
             shaders.dependOn(&convert.step);

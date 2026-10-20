@@ -330,10 +330,10 @@ pub const System = struct {
         if (flags & ft.FT_FACE_FLAG_MULTIPLE_MASTERS != 0) system.readAxes(&loaded);
 
         if (system.coordinates.items.len == 0) {
-            try system.coordinates.append(system.allocator, .{ .font = @enumFromInt(0), .values = @splat(0) });
+            try system.coordinates.append(system.allocator, .{ .font = @fromBackingInt(@intCast(0)), .values = @splat(0) });
         }
         try system.faces.append(system.allocator, loaded);
-        return @enumFromInt(system.faces.items.len - 1);
+        return @fromBackingInt(@intCast(system.faces.items.len - 1));
     }
 
     fn readAxes(system: *System, face: *Face) void {
@@ -356,7 +356,7 @@ pub const System = struct {
     /// The variant of `font` that `style` asks for at `size`, which is the
     /// font size in the unit of the coordinates.
     fn variantFor(system: *System, font: Font, style: types.TextStyle) Variant {
-        const face = &system.faces.items[@intFromEnum(font)];
+        const face = &system.faces.items[@backingInt(font)];
         if (face.axis_count == 0) return 0;
 
         var record: Coordinates = .{ .font = font, .values = @splat(0) };
@@ -850,13 +850,13 @@ pub const System = struct {
         const emoji_selector = 0xFE0F;
         if (after < string.len and decode(string[after..]).codepoint == emoji_selector) {
             for (fonts, 0..) |font, index| {
-                const face = system.faces.items[@intFromEnum(font)];
+                const face = system.faces.items[@backingInt(font)];
                 if (face.color and ft.FT_Get_Char_Index(face.face, here.codepoint) != 0) return index;
             }
         }
 
         for (fonts, 0..) |font, index| {
-            const face = system.faces.items[@intFromEnum(font)].face;
+            const face = system.faces.items[@backingInt(font)].face;
             if (ft.FT_Get_Char_Index(face, here.codepoint) != 0) return index;
         }
         return 0;
@@ -865,7 +865,7 @@ pub const System = struct {
     /// The face of `font`, set to `variant` and `size`. A face holds one of
     /// each at a time.
     fn sized(system: *System, font: Font, variant: Variant, size: i32) *Face {
-        const face = &system.faces.items[@intFromEnum(font)];
+        const face = &system.faces.items[@backingInt(font)];
         if (face.size == size and face.variant == variant) return face;
 
         if (face.variant != variant) {

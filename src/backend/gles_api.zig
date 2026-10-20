@@ -123,12 +123,12 @@ pub const Functions = struct {
 
     pub fn load(loader: Loader) !Functions {
         var functions: Functions = undefined;
-        inline for (@typeInfo(Functions).@"struct".fields) |field| {
-            const function = loader("gl" ++ field.name) orelse {
-                std.log.err("gles: {s} is missing", .{"gl" ++ field.name});
+        inline for (@typeInfo(Functions).@"struct".field_names) |name| {
+            const function = loader("gl" ++ name) orelse {
+                std.log.err("gles: {s} is missing", .{"gl" ++ name});
                 return error.MissingFunction;
             };
-            @field(functions, field.name) = @ptrCast(function);
+            @field(functions, name) = @ptrCast(function);
         }
         return functions;
     }

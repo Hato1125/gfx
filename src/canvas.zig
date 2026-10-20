@@ -318,10 +318,10 @@ pub const Canvas = struct {
         for (canvas.images.items, 0..) |*slot, index| {
             if (slot.backend != 0) continue;
             slot.* = created;
-            return @enumFromInt(index);
+            return @fromBackingInt(@intCast(index));
         }
         try canvas.images.append(allocator, created);
-        return @enumFromInt(canvas.images.items.len - 1);
+        return @fromBackingInt(@intCast(canvas.images.items.len - 1));
     }
 
     /// Compiles `source`, which the effects of later layers can then run.
@@ -332,29 +332,29 @@ pub const Canvas = struct {
         for (canvas.shaders.items, 0..) |*slot, index| {
             if (slot.* != 0) continue;
             slot.* = program;
-            return @enumFromInt(index);
+            return @fromBackingInt(@intCast(index));
         }
         try canvas.shaders.append(canvas.allocator, program);
-        return @enumFromInt(canvas.shaders.items.len - 1);
+        return @fromBackingInt(@intCast(canvas.shaders.items.len - 1));
     }
 
     /// Not while a frame that runs the shader is still open.
     pub fn destroyShader(canvas: *Canvas, handle: Shader) void {
-        const slot = &canvas.shaders.items[@intFromEnum(handle)];
+        const slot = &canvas.shaders.items[@backingInt(handle)];
         canvas.backend.destroyShader(slot.*);
         slot.* = 0;
     }
 
     /// Not while a frame that draws the image is still open.
     pub fn destroyImage(canvas: *Canvas, handle: Image) void {
-        const slot = &canvas.images.items[@intFromEnum(handle)];
+        const slot = &canvas.images.items[@backingInt(handle)];
         canvas.backend.destroyImage(slot.backend);
         slot.* = .{};
     }
 
     /// In the pixels of the image.
     pub fn imageSize(canvas: *Canvas, handle: Image) Extent {
-        const slot = canvas.images.items[@intFromEnum(handle)];
+        const slot = canvas.images.items[@backingInt(handle)];
         return .{ .width = @floatFromInt(slot.width), .height = @floatFromInt(slot.height) };
     }
 
@@ -367,7 +367,7 @@ pub const Canvas = struct {
             std.log.err("canvas: more than {d} shapes in one frame", .{max_instances});
             return;
         }
-        const slot = canvas.images.items[@intFromEnum(p.image)];
+        const slot = canvas.images.items[@backingInt(p.image)];
         if (slot.backend == 0 or p.width <= 0 or p.height <= 0) return;
 
         // The part of the image to show, and the part of the box to show
@@ -613,7 +613,7 @@ pub const Canvas = struct {
         layer.effects[layer.effect_count] = switch (e) {
             .blur => |blur| .{ .blur = .{ .sigma = blur.sigma * canvas.scale } },
             .shader => |run| blk: {
-                std.debug.assert(canvas.shaders.items[@intFromEnum(run.shader)] != 0);
+                std.debug.assert(canvas.shaders.items[@backingInt(run.shader)] != 0);
                 var params: [types.max_shader_params][4]f32 = @splat(.{ 0, 0, 0, 0 });
                 const count = @min(run.params.len, params.len);
                 @memcpy(params[0..count], run.params[0..count]);
